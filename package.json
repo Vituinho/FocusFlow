@@ -1,0 +1,53 @@
+{
+  "name": "focusflow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rotina diária com widget flutuante de foco para Windows",
+  "author": "FocusFlow",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && tsc -p tsconfig.electron.json && electron .\"",
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "icon:generate": "node scripts/generate-icon.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
+    "test": "vitest run",
+    "package:win": "npm run build && electron-builder --win nsis",
+    "package:portable": "npm run build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.4.5",
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "br.com.focusflow.desktop",
+    "productName": "FocusFlow",
+    "asar": true,
+    "directories": { "output": "release-win" },
+    "files": ["dist/**", "dist-electron/**", "package.json"],
+    "win": { "icon": "build/icon.ico", "target": ["nsis"], "artifactName": "FocusFlow-Setup-${version}.${ext}" },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "language": "1046",
+      "installerLanguages": ["pt_BR"],
+      "shortcutName": "FocusFlow"
+    }
+  }
+}
