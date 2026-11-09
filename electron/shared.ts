@@ -35,7 +35,19 @@ export type RuntimeState = {
   skippedKeys: string[]
 }
 
-export type AppData = { schedule: Activity[]; settings: AppSettings; runtime: RuntimeState; widgetBounds?: { x: number; y: number; width: number; height: number } }
+export type WindowRect = { x: number; y: number; width: number; height: number }
+
+/** Persisted document (focusflow.json), format version 2. */
+export type AppData = {
+  version: 2
+  schedules: ScheduleSet
+  settings: AppSettings
+  runtime: RuntimeState
+  widgetBounds?: WindowRect
+  dashboardBounds?: WindowRect & { maximized?: boolean }
+  /** Whether the user last left the floating widget visible. */
+  widgetVisible: boolean
+}
 
 export type ScheduleKind = 'weekday' | 'saturday'
 
@@ -56,6 +68,31 @@ export type ScheduleView = {
 }
 
 export type Snapshot = { data: AppData; view: ScheduleView; now: number }
+
+export type TransitionPayload = { name: string; nextName: string; warning: boolean; sound: boolean; speech: boolean }
+
+export type StartupStatus = {
+  /** False in development builds and on non-Windows systems. */
+  supported: boolean
+  /** The app is registered to start with Windows. */
+  enabled: boolean
+  /** Registered and not disabled by the user in Windows Settings > Startup apps. */
+  willLaunch: boolean
+}
+
+export type AppStatus = {
+  version: string
+  packaged: boolean
+  startup: StartupStatus
+  launchedHidden: boolean
+  previousSessionEndedUnexpectedly: boolean
+  /** Renderer/window recoveries since this launch. */
+  recoveries: number
+  logDirectory: string
+  recentIssues: { time: string; level: 'warn' | 'error'; message: string }[]
+}
+
+export type ScheduleSaveResult = { error?: string; schedule?: Activity[] }
 
 export type RuntimeCommand =
   | { type: 'pause' }
@@ -100,3 +137,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
 }
 
 export const DEFAULT_RUNTIME: RuntimeState = { paused: false, focusMode: false, skippedKeys: [] }
+
+export type { HardwareSnapshot, HardwareStatus, HardwareVolume } from './hardwareTypes'

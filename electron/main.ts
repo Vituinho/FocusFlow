@@ -1,41 +1,90 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, Tray, powerMonitor } from 'electron'
-import path from 'node:path'
+import { app, BrowserWindow, crashReporter, ipcMain, Menu, nativeTheme, Notification, powerMonitor, screen, session, shell, Tray } from 'electron'
 import fs from 'node:fs'
-import { Activity, AppData, AppSettings, DEFAULT_RUNTIME, DEFAULT_SCHEDULE, DEFAULT_SETTINGS, RuntimeCommand, RuntimeState, Snapshot } from './shared'
-import { getScheduleView, validateSchedule } from '../src/domain/schedule'
-import { isFreshTransition, pauseRuntime, resumeRuntime } from '../src/domain/runtime'
+import os from 'node:os'
+import path from 'node:path'
+import { fitBoundsToDisplays, isRect, Rect } from './bounds'
+import { HardwareMonitor } from './hardware'
+import { sumCpuTimes } from './hardwareParse'
+import { EMPTY_HARDWARE, HardwareSnapshot, validateHardwareSnapshot } from './hardwareTypes'
+import { attachCloseToTray, attachRendererRecovery, QuitState, RestartBudget } from './lifecycle'
+import { createLogger, Logger } from './logger'
+import { createPerfWorker } from './perfWorker'
+import { SessionSentinel } from './session'
+import { AppData, AppSettings, AppStatus, DEFAULT_SCHEDULES, RuntimeCommand, ScheduleKind, ScheduleSaveResult, Snapshot, StartupStatus, TransitionPayload } from './shared'
+import { JsonStore } from './store'
+import { loadTrayIcon, TrayIconReport } from './trayIcon'
+import { ScheduleEngine, EngineEvent, effectiveView } from '../src/domain/engine'
+import { defaultData, migrateData, needsMigrationBackup, parseActivities } from '../src/domain/migration'
+import { applyRuntimeCommand } from '../src/domain/runtime'
+import { runSmoke } from './smoke'
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Process setup. Everything that touches disk happens after the single-instance lock is held, so a second launch can
+// never read, overwrite or race the real configuration.
+// ---------------------------------------------------------------------------------------------------------------------
 
 const devUrl = process.env.VITE_DEV_SERVER_URL
-const storePath = () => path.join(app.getPath('userData'), 'focusflow.json')
-let data: AppData = { schedule: DEFAULT_SCHEDULE, settings: DEFAULT_SETTINGS, runtime: DEFAULT_RUNTIME }
+const launchedHidden = process.argv.includes('--hidden')
+const LOGIN_ARGS = ['--hidden']
+const LOGIN_NAME = 'FocusFlow'
+const isDevelopment = !app.isPackaged
+
+// The interface is Brazilian Portuguese: make native controls (24-hour time pickers, date formats) match it on any system language.
+app.commandLine.appendSwitch('lang', 'pt-BR')
+if (process.env.FOCUSFLOW_USER_DATA) app.setPath('userData', path.resolve(process.env.FOCUSFLOW_USER_DATA))
+
+const quit = new QuitState()
+const engine = new ScheduleEngine()
+let logger: Logger
+let store: JsonStore
+let sentinel: SessionSentinel
+let data: AppData = defaultData()
+let loaded = false
 let dashboard: BrowserWindow | null = null
 let widget: BrowserWindow | null = null
 let tray: Tray | null = null
+let trayReport: TrayIconReport | null = null
 let tickHandle: NodeJS.Timeout | undefined
-let boundsSaveHandle: NodeJS.Timeout | undefined
-let lastActivityKey = ''
-let lastWarningKey = ''
-let initializedEngine = false
-let currentDay = ''
-let isQuitting = false
+let hardware: HardwareMonitor | null = null
+let revision = 0
+let lastSignature = ''
+let lastTrayKey = ''
+let recoveries = 0
+let previousSessionCrashed = false
+let suspended = false
+let displayTimer: NodeJS.Timeout | undefined
+let lastHardware: HardwareSnapshot = EMPTY_HARDWARE
+/** Set once the user (or a manual reload) asked for the dashboard, so a hidden start never hides a requested window. */
+let recoveriesShouldShow = false
+const notifications = new Set<Notification>()
+const windowBudgets = { dashboard: new RestartBudget(3, 5 * 60_000), widget: new RestartBudget(3, 5 * 60_000) }
 
-function readData(): AppData {
-  try {
-    const saved = JSON.parse(fs.readFileSync(storePath(), 'utf8')) as Partial<AppData>
-    const schedule = Array.isArray(saved.schedule) && !validateSchedule(saved.schedule) ? saved.schedule : DEFAULT_SCHEDULE
-    const settings = { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) }
-    const workingDays = settings.workingDays.filter(day => Number.isInteger(day) && day >= 0 && day <= 6)
-    const widgetBounds = saved.widgetBounds && [saved.widgetBounds.x, saved.widgetBounds.y, saved.widgetBounds.width, saved.widgetBounds.height].every(Number.isFinite) ? saved.widgetBounds : undefined
-    return { schedule, settings: { ...settings, workingDays: workingDays.length ? workingDays : DEFAULT_SETTINGS.workingDays }, runtime: { ...DEFAULT_RUNTIME, ...(saved.runtime ?? {}) }, widgetBounds }
-  } catch { return { schedule: DEFAULT_SCHEDULE, settings: DEFAULT_SETTINGS, runtime: DEFAULT_RUNTIME } }
+// ---------------------------------------------------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------------------------------------------------
+
+function persist() { revision++; store.schedule(() => data) }
+
+function loadData() {
+  const result = store.load()
+  const migration = migrateData(result.raw)
+  if (result.source === 'none' && result.quarantined) {
+    logger.error(`Configuration was unreadable and has been preserved as ${result.quarantined}; defaults are in use`)
+  } else if (result.source === 'backup') logger.warn('Configuration restored from the last known good backup')
+  if (migration.migratedFrom !== null && needsMigrationBackup(migration)) {
+    const backup = store.backupForMigration(`v${migration.migratedFrom}`)
+    logger.info(`Migrated configuration from v${migration.migratedFrom} to v${migration.data.version}${backup ? `; original kept at ${backup}` : ''}`)
+  }
+  for (const warning of migration.warnings) logger.warn(`Configuration: ${warning}`)
+  data = migration.data
+  loaded = true
+  store.writeNow(data)
+  store.refreshBackup()
 }
 
-function writeData() {
-  try {
-    fs.mkdirSync(path.dirname(storePath()), { recursive: true })
-    fs.writeFileSync(storePath(), JSON.stringify(data, null, 2), 'utf8')
-  } catch (error) { console.error('Não foi possível salvar os dados locais do FocusFlow:', error) }
-}
+// ---------------------------------------------------------------------------------------------------------------------
+// Trusted windows and IPC plumbing
+// ---------------------------------------------------------------------------------------------------------------------
 
 function isTrustedUrl(url: string) {
   try {
@@ -45,267 +94,547 @@ function isTrustedUrl(url: string) {
   } catch { return false }
 }
 
+const liveWindows = () => [dashboard, widget].filter((window): window is BrowserWindow => !!window && !window.isDestroyed())
+
 function isValidSender(event: Electron.IpcMainInvokeEvent) {
-  return [dashboard, widget].some(window => window && !window.isDestroyed() && window.webContents.id === event.sender.id && isTrustedUrl(event.sender.getURL()))
+  if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) return false
+  return liveWindows().some(window => window.webContents.id === event.sender.id) && isTrustedUrl(event.sender.getURL())
 }
 
 function guardWindow(window: BrowserWindow) {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => { if (!isTrustedUrl(url)) event.preventDefault() })
+  window.webContents.on('will-attach-webview', event => event.preventDefault())
 }
 
-function dayKey(now: number) {
-  const date = new Date(now)
-  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+function send(channel: string, payload: unknown, onlyVisible = false) {
+  for (const window of liveWindows()) {
+    if (onlyVisible && !window.isVisible()) continue
+    try { window.webContents.send(channel, payload) } catch (error) { logger.warn(`Could not send ${channel}`, error) }
+  }
 }
+
+function handle<T>(channel: string, fallback: T, fn: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => T | Promise<T>) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    if (!isValidSender(event)) { logger.warn(`Rejected IPC ${channel} from an untrusted sender`); return fallback }
+    try { return await fn(event, ...args) } catch (error) { logger.error(`IPC ${channel} failed`, error); return fallback }
+  })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// State -> snapshots, notifications
+// ---------------------------------------------------------------------------------------------------------------------
 
 function snapshot(now = Date.now()): Snapshot {
-  const view = getScheduleView(now, data.schedule, data.settings.workingDays)
-  const runtime = data.runtime
-  if (runtime.manual && runtime.manual.endAt <= now) {
-    runtime.manual = undefined
-    writeData()
-  }
-  if (runtime.manual && runtime.manual.endAt > now) {
-    const startAt = runtime.manual.endAt - Math.max(0, runtime.manual.endAt - now)
-    view.kind = 'activity'
-    view.activity = { id: 'manual', name: runtime.manual.name, start: new Date(startAt).toTimeString().slice(0, 5), end: new Date(runtime.manual.endAt).toTimeString().slice(0, 5), color: '#58d5bd', icon: 'sparkles' }
-    view.next = null
-    view.startAt = now
-    view.endAt = runtime.manual.endAt
-    view.nextAt = runtime.manual.endAt
-  }
-  return { data, view, now }
+  return { data, view: effectiveView(now, data.schedules, data.settings.workingDays, data.runtime), now }
 }
 
-function activityKey(now: number, view: Snapshot['view']) {
-  const item = view.activity
-  return item ? `${dayKey(now)}:${item.id}` : `${dayKey(now)}:${view.kind}`
-}
+function broadcastSnapshot() { send('snapshot:updated', snapshot()) }
 
-function broadcastSnapshot() {
-  const value = snapshot()
-  for (const window of [dashboard, widget]) {
-    if (window && !window.isDestroyed()) window.webContents.send('snapshot:updated', value)
-  }
-}
-
-function transition(name: string, nextName: string, warning = false) {
-  const payload = { name, nextName, warning }
+function notify(event: EngineEvent) {
+  const warning = event.type === 'warning'
+  const payload: TransitionPayload = { name: event.name, nextName: event.nextName, warning, sound: data.settings.sound, speech: data.settings.speech }
   if (data.settings.notifications && Notification.isSupported()) {
-    const title = warning ? 'Faltam 5 minutos' : 'Atividade iniciada'
-    new Notification({ title, body: warning ? `${name} termina em breve.` : `Agora: ${name}${nextName ? ` · em seguida: ${nextName}` : ''}`, silent: true }).show()
+    try {
+      const toast = new Notification({
+        title: warning ? 'Faltam 5 minutos' : 'Atividade iniciada',
+        body: warning ? `${event.name} termina em breve.` : `Agora: ${event.name}${event.nextName ? ` · em seguida: ${event.nextName}` : ''}`,
+        silent: true,
+      })
+      notifications.add(toast) // keep a reference: unreferenced toasts may be collected before the user clicks them
+      toast.on('click', () => openDashboard())
+      toast.on('close', () => notifications.delete(toast))
+      toast.on('failed', () => notifications.delete(toast))
+      toast.show()
+    } catch (error) { logger.warn('Could not show the notification', error) }
   }
-  for (const window of [dashboard, widget]) {
-    if (window && !window.isDestroyed()) window.webContents.send('activity:transition', payload)
-  }
+  send('activity:transition', payload)
 }
 
-function runEngine(suppressEvents = false) {
-  const now = Date.now()
-  const key = dayKey(now)
-  if (!currentDay) currentDay = key
-  else if (currentDay !== key) {
-    currentDay = key
-    data.runtime.skippedKeys = []
-    data.runtime.manual = undefined
-    data.runtime.paused = false
-    data.runtime.frozenRemainingMs = undefined
-    writeData()
-  }
-  const current = snapshot(now).view
-  const currentKey = activityKey(now, current)
-  if (!initializedEngine) {
-    lastActivityKey = currentKey
-    initializedEngine = true
-  } else if (currentKey !== lastActivityKey) {
-    if (!data.runtime.paused && current.kind === 'activity' && current.activity && isFreshTransition(lastActivityKey, currentKey, now, current.startAt, suppressEvents)) {
-      transition(current.activity.name, current.next?.name ?? '')
+function tick(suppress = false) {
+  try {
+    const now = Date.now()
+    const result = engine.tick({ now, schedules: data.schedules, workingDays: data.settings.workingDays, runtime: data.runtime, warningsEnabled: data.settings.warnings }, suppress)
+    let changed = false
+    if (result.dayChanged) {
+      data.runtime = { ...data.runtime, manual: undefined, paused: false, pausedAt: undefined, frozenRemainingMs: undefined, pausedActivityName: undefined, skippedKeys: [] }
+      changed = true
+    } else if (result.manualExpired) {
+      data.runtime = { ...data.runtime, manual: undefined }
+      changed = true
     }
-    lastActivityKey = currentKey
-  }
-  if (!suppressEvents && !data.runtime.paused && data.settings.warnings && current.activity && current.endAt) {
-    const remaining = current.endAt - now
-    const warningKey = `${currentKey}:warning`
-    if (remaining <= 5 * 60_000 && remaining > 4 * 60_000 && lastWarningKey !== warningKey) {
-      lastWarningKey = warningKey
-      transition(current.activity.name, current.next?.name ?? '', true)
+    if (changed) persist()
+    for (const event of result.events) notify(event)
+    // The renderers keep their own one-second clock; the main process only pushes when something actually changed.
+    const { view } = result
+    const signature = `${view.kind}|${view.activity?.id}|${view.startAt}|${view.endAt}|${view.nextAt}|${view.scheduleKind}|${revision}`
+    if (signature !== lastSignature) {
+      lastSignature = signature
+      broadcastSnapshot()
+      updateTray()
     }
-  }
-  broadcastSnapshot()
+  } catch (error) { logger.error('Schedule tick failed', error) }
 }
 
-function iconImage() {
-  return nativeImage.createFromDataURL('data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect x="3" y="3" width="58" height="58" rx="18" fill="#58d5bd"/><path d="M20 34a12 12 0 1 0 2-7" fill="none" stroke="#101317" stroke-width="5" stroke-linecap="round"/><path d="M18 20v9h9" fill="none" stroke="#101317" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M32 22v11l8 5" fill="none" stroke="#101317" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>'))
+// ---------------------------------------------------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------------------------------------------------
+
+const displays = () => screen.getAllDisplays().map(display => ({ id: display.id, workArea: display.workArea }))
+const primaryDisplay = () => { const primary = screen.getPrimaryDisplay(); return { id: primary.id, workArea: primary.workArea } }
+
+/** Taller by one row when the hardware summary is shown. */
+const HARDWARE_ROW = 26
+function widgetSize() {
+  const extra = data.settings.hardwareMonitor ? HARDWARE_ROW : 0
+  return data.settings.compactWidget ? { width: 286, height: 112 + extra } : { width: 310, height: 220 + extra }
+}
+
+function widgetRect(): Rect {
+  const size = widgetSize()
+  const saved = data.widgetBounds ? { ...data.widgetBounds, ...size } : undefined
+  return fitBoundsToDisplays(saved, displays(), primaryDisplay(), size)
+}
+
+function dashboardRect(): Rect {
+  return fitBoundsToDisplays(data.dashboardBounds, displays(), primaryDisplay(), { width: 1220, height: 820 }, { width: 880, height: 650 })
+}
+
+function webPreferences() {
+  return { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' as const }
+}
+
+function loadRenderer(window: BrowserWindow, query?: Record<string, string>) {
+  const load = devUrl
+    ? window.loadURL(query ? `${devUrl}?${new URLSearchParams(query)}` : devUrl)
+    : window.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), query ? { query } : undefined)
+  load.catch(error => logger.warn('Renderer load rejected (recovery will handle it)', error))
+}
+
+function watchRenderer(name: 'dashboard' | 'widget', window: BrowserWindow) {
+  attachRendererRecovery({
+    name, contents: window.webContents, budget: windowBudgets[name], quit, logger,
+    onRecovering: () => { recoveries++ },
+    onGiveUp: reason => {
+      logger.error(`${name} could not be recovered automatically (${reason}); use "Recarregar janelas" in the tray menu`)
+      if (Notification.isSupported()) new Notification({ title: 'FocusFlow', body: 'Uma janela do FocusFlow parou de responder. Use “Recarregar janelas” no menu da bandeja.', silent: true }).show()
+    },
+  })
+}
+
+function trackVisibility(window: BrowserWindow) {
+  const changed = () => { syncHardware(); updateTray() }
+  window.on('show', changed)
+  window.on('hide', changed)
+  window.on('minimize', changed)
+  window.on('restore', changed)
+}
+
+function saveDashboardBounds() {
+  if (!dashboard || dashboard.isDestroyed() || dashboard.isMinimized()) return
+  const maximized = dashboard.isMaximized()
+  const normal = dashboard.getNormalBounds()
+  data.dashboardBounds = { ...normal, ...(maximized ? { maximized: true } : {}) }
+  store.schedule(() => data)
 }
 
 function createDashboard() {
-  dashboard = new BrowserWindow({
-    width: 1220, height: 820, minWidth: 880, minHeight: 650,
-    title: 'FocusFlow', backgroundColor: '#101317', show: false,
-    titleBarStyle: 'hidden', autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  const rect = dashboardRect()
+  const window = new BrowserWindow({
+    ...rect, minWidth: 880, minHeight: 650, title: 'FocusFlow', backgroundColor: '#101317', show: false,
+    titleBarStyle: 'hidden', autoHideMenuBar: true, webPreferences: webPreferences(),
   })
-  guardWindow(dashboard)
-  if (devUrl) void dashboard.loadURL(devUrl)
-  else void dashboard.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
-  dashboard.once('ready-to-show', () => dashboard?.show())
-  dashboard.on('close', event => { if (!isQuitting) { event.preventDefault(); dashboard?.hide() } })
-  dashboard.on('closed', () => { dashboard = null })
-}
-
-function widgetBounds() {
-  const area = screen.getPrimaryDisplay().workArea
-  const bounds = data.widgetBounds ?? { x: area.x + area.width - 340, y: area.y + 40, width: 310, height: 220 }
-  const display = screen.getDisplayMatching(bounds)
-  const displayArea = display.workArea
-  return {
-    x: Math.max(displayArea.x, Math.min(bounds.x, displayArea.x + displayArea.width - bounds.width)),
-    y: Math.max(displayArea.y, Math.min(bounds.y, displayArea.y + displayArea.height - bounds.height)),
-    width: data.settings.compactWidget ? 286 : 310,
-    height: data.settings.compactWidget ? 112 : 220,
-  }
+  dashboard = window
+  guardWindow(window)
+  watchRenderer('dashboard', window)
+  attachCloseToTray(window, quit, saveDashboardBounds)
+  trackVisibility(window)
+  window.once('ready-to-show', () => {
+    if (data.dashboardBounds?.maximized) window.maximize()
+    if (!launchedHidden || recoveriesShouldShow) window.show()
+  })
+  window.on('resize', saveDashboardBounds)
+  window.on('move', saveDashboardBounds)
+  window.on('closed', () => { if (dashboard === window) dashboard = null })
+  loadRenderer(window)
 }
 
 function createWidget() {
-  widget = new BrowserWindow({
-    ...widgetBounds(), title: 'FocusFlow · Foco', frame: false, resizable: false,
-    alwaysOnTop: data.settings.alwaysOnTop, transparent: data.settings.transparency,
-    backgroundColor: data.settings.transparency ? '#00000000' : '#171b20', show: false,
-    skipTaskbar: true, titleBarStyle: 'hidden',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  const window = new BrowserWindow({
+    ...widgetRect(), title: 'FocusFlow · Foco', frame: false, resizable: false, alwaysOnTop: data.settings.alwaysOnTop,
+    transparent: data.settings.transparency, backgroundColor: data.settings.transparency ? '#00000000' : '#171b20', show: false,
+    skipTaskbar: true, titleBarStyle: 'hidden', webPreferences: webPreferences(),
   })
-  guardWindow(widget)
-  if (devUrl) void widget.loadURL(`${devUrl}?window=widget`)
-  else void widget.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), { query: { window: 'widget' } })
-  widget.once('ready-to-show', () => widget?.showInactive())
-  widget.on('close', event => { if (!isQuitting) { event.preventDefault(); widget?.hide() } })
-  widget.on('moved', () => {
-    if (!widget || widget.isDestroyed()) return
-    data.widgetBounds = widget.getBounds()
-    if (boundsSaveHandle) clearTimeout(boundsSaveHandle)
-    boundsSaveHandle = setTimeout(writeData, 350)
+  widget = window
+  guardWindow(window)
+  watchRenderer('widget', window)
+  attachCloseToTray(window, quit)
+  trackVisibility(window)
+  window.once('ready-to-show', () => { if (data.widgetVisible) window.showInactive() })
+  window.on('moved', () => {
+    if (window.isDestroyed()) return
+    data.widgetBounds = window.getBounds()
+    store.schedule(() => data)
   })
-  widget.on('closed', () => { widget = null })
+  window.on('closed', () => { if (widget === window) widget = null })
+  loadRenderer(window, { window: 'widget' })
+}
+
+function openDashboard() {
+  if (!dashboard || dashboard.isDestroyed()) { recoveriesShouldShow = true; createDashboard() }
+  const window = dashboard!
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
+function showWidget() {
+  if (!widget || widget.isDestroyed()) createWidget()
+  data.widgetVisible = true; persist()
+  widget!.setBounds(widgetRect())
+  widget!.showInactive()
+}
+
+function hideWidget() {
+  data.widgetVisible = false; persist()
+  widget?.hide()
+}
+
+/** Manual recovery: replaces both windows with fresh ones and a fresh restart budget. */
+function reloadWindows() {
+  logger.info('Windows reloaded manually')
+  windowBudgets.dashboard = new RestartBudget(3, 5 * 60_000)
+  windowBudgets.widget = new RestartBudget(3, 5 * 60_000)
+  const dashboardWasVisible = !!dashboard && !dashboard.isDestroyed() && dashboard.isVisible()
+  for (const window of liveWindows()) window.destroy()
+  dashboard = null; widget = null
+  recoveriesShouldShow = dashboardWasVisible || !launchedHidden
+  createDashboard(); createWidget()
+  if (dashboardWasVisible) recoveriesShouldShow = true
+}
+
+function refitWindows() {
+  if (displayTimer) clearTimeout(displayTimer)
+  displayTimer = setTimeout(() => {
+    try {
+      if (widget && !widget.isDestroyed()) widget.setBounds(widgetRect())
+      if (dashboard && !dashboard.isDestroyed() && !dashboard.isMaximized() && !dashboard.isMinimized()) dashboard.setBounds(dashboardRect())
+      refreshTrayIcon()
+    } catch (error) { logger.warn('Could not re-fit windows after a display change', error) }
+  }, 400)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tray: created once, updated in place
+// ---------------------------------------------------------------------------------------------------------------------
+
+function trayStatusLabel(): string {
+  const { view } = snapshot()
+  const paused = data.runtime.paused
+  if (view.kind === 'rest') return 'Dia de descanso'
+  if (view.kind === 'finished') return 'Dia concluído'
+  if (view.kind === 'before') return `Próximo: ${view.next?.name ?? 'início da rotina'}`
+  return `${paused ? 'Pausado' : 'Agora'}: ${view.activity?.name ?? ''}`
+}
+
+function buildTrayMenu() {
+  const widgetVisible = !!widget && !widget.isDestroyed() && widget.isVisible()
+  return Menu.buildFromTemplate([
+    { label: trayStatusLabel().slice(0, 60), enabled: false },
+    { type: 'separator' },
+    { label: 'Abrir painel', click: () => openDashboard() },
+    widgetVisible ? { label: 'Ocultar widget', click: () => hideWidget() } : { label: 'Mostrar widget', click: () => showWidget() },
+    { type: 'separator' },
+    { label: 'Manter widget acima das janelas', type: 'checkbox', checked: data.settings.alwaysOnTop, click: () => applySettings({ ...data.settings, alwaysOnTop: !data.settings.alwaysOnTop }) },
+    { label: 'Notificações', type: 'checkbox', checked: data.settings.notifications, click: () => applySettings({ ...data.settings, notifications: !data.settings.notifications }) },
+    { label: 'Monitor de hardware', type: 'checkbox', checked: data.settings.hardwareMonitor, click: () => applySettings({ ...data.settings, hardwareMonitor: !data.settings.hardwareMonitor }) },
+    { type: 'separator' },
+    { label: 'Recarregar janelas', click: () => reloadWindows() },
+    { label: 'Abrir pasta de logs', click: () => { void shell.openPath(logger.directory) } },
+    { type: 'separator' },
+    { label: 'Sair do FocusFlow', click: () => requestQuit() },
+  ])
+}
+
+function trayTooltip(): string {
+  const parts = ['FocusFlow', trayStatusLabel()]
+  if (data.settings.hardwareMonitor && lastHardware.status === 'ok' && lastHardware.cpu !== null) parts.push(`CPU ${Math.round(lastHardware.cpu)}%`)
+  return parts.join(' · ').slice(0, 120)
+}
+
+function updateTray() {
+  if (!tray || tray.isDestroyed()) return
+  const widgetVisible = !!widget && !widget.isDestroyed() && widget.isVisible()
+  const key = [trayStatusLabel(), widgetVisible, data.settings.alwaysOnTop, data.settings.notifications, data.settings.hardwareMonitor].join('|')
+  if (key !== lastTrayKey) {
+    lastTrayKey = key
+    tray.setContextMenu(buildTrayMenu())
+    tray.setToolTip(trayTooltip())
+  }
+}
+
+function refreshTrayIcon() {
+  if (!tray || tray.isDestroyed()) return
+  const { image, report } = loadTrayIcon(logger)
+  trayReport = report
+  tray.setImage(image)
 }
 
 function createTray() {
-  tray?.destroy()
-  tray = new Tray(iconImage())
-  tray.setToolTip('FocusFlow · sua rotina em fluxo')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Abrir painel', click: () => { dashboard?.show(); dashboard?.focus() } },
-    { label: 'Mostrar widget', click: () => { if (!widget) createWidget(); widget?.showInactive() } },
-    { label: 'Ocultar widget', click: () => { widget?.hide() } },
-    { type: 'separator' },
-    { label: 'Manter widget acima das janelas', type: 'checkbox', checked: data.settings.alwaysOnTop, click: () => { data.settings.alwaysOnTop = !data.settings.alwaysOnTop; widget?.setAlwaysOnTop(data.settings.alwaysOnTop); writeData(); createTray(); broadcastSnapshot() } },
-    { label: 'Notificações', type: 'checkbox', checked: data.settings.notifications, click: () => { data.settings.notifications = !data.settings.notifications; writeData(); createTray(); broadcastSnapshot() } },
-    { type: 'separator' },
-    { label: 'Sair do FocusFlow', click: () => { isQuitting = true; app.quit() } },
-  ]))
-  tray.on('double-click', () => { dashboard?.show(); dashboard?.focus() })
+  const { image, report } = loadTrayIcon(logger)
+  trayReport = report
+  logger.info(`Tray icon: ${report.source}, empty=${report.empty}, ${report.size.width}x${report.size.height}`)
+  tray = new Tray(image)
+  tray.setToolTip(trayTooltip())
+  tray.setContextMenu(buildTrayMenu())
+  lastTrayKey = ''
+  updateTray()
+  // The context menu opens on right click by itself. A single or double left click opens the dashboard.
+  tray.on('click', () => openDashboard())
+  tray.on('double-click', () => openDashboard())
 }
 
-function openDashboard() { if (!dashboard) createDashboard(); dashboard?.show(); dashboard?.focus() }
+// ---------------------------------------------------------------------------------------------------------------------
+// Start with Windows
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The portable build runs from a temporary folder; the stable path is the portable executable itself. */
+const loginExecutable = () => process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+
+function startupStatus(): StartupStatus {
+  if (!app.isPackaged || process.platform !== 'win32') return { supported: false, enabled: false, willLaunch: false }
+  try {
+    const settings = app.getLoginItemSettings({ path: loginExecutable(), args: LOGIN_ARGS, name: LOGIN_NAME } as Electron.LoginItemSettingsOptions)
+    return { supported: true, enabled: settings.openAtLogin, willLaunch: settings.executableWillLaunchAtLogin ?? settings.openAtLogin }
+  } catch (error) { logger.warn('Could not read the startup registration', error); return { supported: true, enabled: false, willLaunch: false } }
+}
+
+function applyLoginItem() {
+  if (!app.isPackaged || process.platform !== 'win32') return
+  try {
+    app.setLoginItemSettings({ openAtLogin: data.settings.launchAtStartup, path: loginExecutable(), args: LOGIN_ARGS, name: LOGIN_NAME } as Electron.Settings)
+  } catch (error) { logger.error('Could not update the Windows startup registration', error) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hardware monitor
+// ---------------------------------------------------------------------------------------------------------------------
+
+async function readSystemVolume() {
+  const drive = `${process.env.SystemDrive || 'C:'}\\`
+  const stats = await fs.promises.statfs(drive)
+  const total = stats.blocks * stats.bsize
+  return { id: drive.slice(0, 2).toUpperCase(), label: '', usedBytes: total - stats.bavail * stats.bsize, totalBytes: total }
+}
+
+function ensureHardware(): HardwareMonitor {
+  if (hardware) return hardware
+  hardware = new HardwareMonitor({
+    provider: createPerfWorker({ logger }),
+    readCpuTimes: () => sumCpuTimes(os.cpus()),
+    readMemory: () => ({ total: os.totalmem(), free: os.freemem() }),
+    readSystemVolume, logger,
+  })
+  hardware.on('update', (value: HardwareSnapshot) => {
+    lastHardware = value
+    const safe = validateHardwareSnapshot(value)
+    if (safe) send('hardware:update', safe, true)
+  })
+  return hardware
+}
+
+/** Sampling only runs while it can be seen: enabled in Settings, awake, and a window is visible. */
+function syncHardware() {
+  const enabled = data.settings.hardwareMonitor
+  const anyVisible = liveWindows().some(window => window.isVisible() && !window.isMinimized())
+  if (enabled && !suspended && anyVisible) ensureHardware().start()
+  else hardware?.stop()
+  if (!enabled) lastHardware = EMPTY_HARDWARE
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------------------------------------------------
 
 function isSettings(value: unknown): value is AppSettings {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Partial<AppSettings>
   return (candidate.theme === 'dark' || candidate.theme === 'light') &&
-    ['notifications', 'sound', 'speech', 'warnings', 'alwaysOnTop', 'transparency', 'launchAtStartup', 'compactWidget'].every(key => typeof candidate[key as keyof AppSettings] === 'boolean') &&
-    Array.isArray(candidate.workingDays) && candidate.workingDays.every(day => Number.isInteger(day) && day >= 0 && day <= 6)
+    ['notifications', 'sound', 'speech', 'warnings', 'alwaysOnTop', 'transparency', 'launchAtStartup', 'compactWidget', 'hardwareMonitor', 'crashRecovery'].every(key => typeof candidate[key as keyof AppSettings] === 'boolean') &&
+    Array.isArray(candidate.workingDays) && candidate.workingDays.length > 0 && candidate.workingDays.length <= 7 && candidate.workingDays.every(day => Number.isInteger(day) && day >= 0 && day <= 6)
 }
 
-function isRuntimeCommand(value: unknown): value is RuntimeCommand {
-  if (!value || typeof value !== 'object' || typeof (value as { type?: unknown }).type !== 'string') return false
-  const candidate = value as RuntimeCommand
-  if (['pause', 'resume', 'skip', 'automatic'].includes(candidate.type)) return true
-  if (candidate.type === 'focus-mode') return typeof candidate.enabled === 'boolean'
-  if (candidate.type === 'manual') return typeof candidate.name === 'string' && candidate.name.trim().length > 0 && candidate.name.length <= 80 && Number.isFinite(candidate.minutes) && candidate.minutes >= 1 && candidate.minutes <= 720
-  if (candidate.type === 'extend') return Number.isFinite(candidate.minutes) && candidate.minutes >= 1 && candidate.minutes <= 120
-  return false
+function applySettings(next: AppSettings) {
+  const previous = data.settings
+  data.settings = { ...next, workingDays: [...new Set(next.workingDays)].sort() }
+  if (previous.launchAtStartup !== next.launchAtStartup) applyLoginItem()
+  if (widget && !widget.isDestroyed()) {
+    widget.setAlwaysOnTop(next.alwaysOnTop)
+    widget.setOpacity(next.transparency ? 0.88 : 1)
+    if (previous.compactWidget !== next.compactWidget || previous.hardwareMonitor !== next.hardwareMonitor) widget.setBounds(widgetRect())
+  }
+  engine.markExternalChange()
+  persist()
+  syncHardware()
+  lastTrayKey = ''
+  tick(true)
+}
+
+function appStatus(): AppStatus {
+  return {
+    version: app.getVersion(), packaged: app.isPackaged, startup: startupStatus(), launchedHidden,
+    previousSessionEndedUnexpectedly: previousSessionCrashed, recoveries, logDirectory: logger.directory,
+    recentIssues: logger.recent().filter((entry): entry is { time: string; level: 'warn' | 'error'; message: string } => entry.level !== 'info').slice(-8),
+  }
 }
 
 function registerIpc() {
-  ipcMain.handle('snapshot:get', event => isValidSender(event) ? snapshot() : null)
-  ipcMain.handle('settings:save', (event, value: unknown) => {
-    if (!isValidSender(event) || !isSettings(value)) return
-    data.settings = value
-    app.setLoginItemSettings({ openAtLogin: app.isPackaged && value.launchAtStartup })
-    widget?.setAlwaysOnTop(value.alwaysOnTop)
-    widget?.setOpacity(value.transparency ? 0.88 : 1)
-    widget?.setBounds(widgetBounds())
-    if (tray) createTray()
-    writeData(); broadcastSnapshot()
+  handle<Snapshot | null>('snapshot:get', null, () => snapshot())
+  handle<void>('settings:save', undefined, (_event, value: unknown) => { if (isSettings(value)) applySettings(value) })
+  handle<ScheduleSaveResult>('schedule:save', { error: 'Não foi possível salvar a agenda.' }, (_event, kind: unknown, value: unknown) => {
+    if (kind !== 'weekday' && kind !== 'saturday') return { error: 'Agenda inválida.' }
+    const parsed = parseActivities(value)
+    if ('error' in parsed) return { error: parsed.error }
+    data.schedules = { ...data.schedules, [kind]: parsed.activities }
+    engine.markExternalChange(); persist(); tick(true)
+    return { schedule: parsed.activities }
   })
-  ipcMain.handle('schedule:save', (event, value: unknown) => {
-    if (!isValidSender(event) || !Array.isArray(value)) return { error: 'Agenda inválida.' }
-    const error = validateSchedule(value as Activity[])
-    if (error) return { error }
-    if ((value as Activity[]).some(item => !item.color || !/^#[0-9a-f]{6}$/i.test(item.color) || typeof item.icon !== 'string' || item.icon.length > 24)) return { error: 'Confira a cor e o ícone de cada atividade.' }
-    data.schedule = [...value as Activity[]].sort((a, b) => a.start.localeCompare(b.start))
-    lastActivityKey = activityKey(Date.now(), snapshot().view)
-    writeData(); broadcastSnapshot()
-    return {}
+  handle<ScheduleSaveResult>('schedule:reset', { error: 'Não foi possível restaurar a agenda.' }, (_event, kind: unknown) => {
+    if (kind !== 'weekday' && kind !== 'saturday') return { error: 'Agenda inválida.' }
+    const schedule = JSON.parse(JSON.stringify(DEFAULT_SCHEDULES[kind as ScheduleKind]))
+    data.schedules = { ...data.schedules, [kind]: schedule }
+    engine.markExternalChange(); persist(); tick(true)
+    return { schedule }
   })
-  ipcMain.handle('runtime:command', (event, value: unknown) => {
-    if (!isValidSender(event) || !isRuntimeCommand(value)) return
-    const command = value as RuntimeCommand
-    const now = Date.now(), view = snapshot(now).view
-    const runtime: RuntimeState = data.runtime
-    if (command.type === 'pause' && !runtime.paused) {
-      data.runtime = pauseRuntime(runtime, view, now)
-    } else if (command.type === 'resume' && runtime.paused) {
-      data.runtime = resumeRuntime(runtime, now)
-    } else if (command.type === 'manual') {
-      runtime.paused = false; runtime.pausedAt = undefined; runtime.frozenRemainingMs = undefined; runtime.pausedActivityName = undefined; runtime.manual = { name: command.name.trim(), endAt: now + command.minutes * 60_000 }
-    } else if (command.type === 'extend' && view.activity) {
-      runtime.paused = false; runtime.manual = { name: view.activity.name, endAt: (view.endAt ?? now) + command.minutes * 60_000 }
-    } else if (command.type === 'skip') {
-      runtime.manual = undefined; runtime.paused = false; runtime.pausedAt = undefined; runtime.frozenRemainingMs = undefined; runtime.pausedActivityName = undefined
-      if (view.next) {
-        const [hours, minutes] = view.next.end.split(':').map(Number)
-        const endAt = new Date(now); endAt.setHours(hours, minutes, 0, 0)
-        if (endAt.getTime() <= now) endAt.setDate(endAt.getDate() + 1)
-        runtime.manual = { name: view.next.name, endAt: endAt.getTime() }
-      }
-    } else if (command.type === 'automatic') {
-      runtime.paused = false; runtime.pausedAt = undefined; runtime.frozenRemainingMs = undefined; runtime.pausedActivityName = undefined; runtime.manual = undefined
-    } else if (command.type === 'focus-mode') runtime.focusMode = command.enabled
-    writeData(); runEngine(true)
+  const isCommand = (value: unknown): value is RuntimeCommand => {
+    if (!value || typeof value !== 'object' || typeof (value as { type?: unknown }).type !== 'string') return false
+    const candidate = value as RuntimeCommand
+    if (['pause', 'resume', 'skip', 'automatic'].includes(candidate.type)) return true
+    if (candidate.type === 'focus-mode') return typeof candidate.enabled === 'boolean'
+    if (candidate.type === 'manual') return typeof candidate.name === 'string' && candidate.name.trim().length > 0 && candidate.name.length <= 80 && Number.isFinite(candidate.minutes) && candidate.minutes >= 1 && candidate.minutes <= 720
+    if (candidate.type === 'extend') return Number.isFinite(candidate.minutes) && candidate.minutes >= 1 && candidate.minutes <= 120
+    return false
+  }
+  handle<void>('runtime:command', undefined, (_event, value: unknown) => {
+    if (!isCommand(value)) return
+    const now = Date.now()
+    data.runtime = applyRuntimeCommand(data.runtime, value, effectiveView(now, data.schedules, data.settings.workingDays, data.runtime), now)
+    engine.markExternalChange(); persist(); tick(true)
   })
-  ipcMain.handle('window:dashboard', event => { if (isValidSender(event)) openDashboard() })
-  ipcMain.handle('window:widget', event => { if (isValidSender(event)) { if (!widget) createWidget(); widget?.showInactive() } })
-  ipcMain.handle('window:minimize', event => { if (isValidSender(event)) dashboard?.hide() })
-  ipcMain.handle('window:close', event => { if (isValidSender(event)) dashboard?.hide() })
-  ipcMain.handle('window:topmost', event => {
-    if (!isValidSender(event)) return
-    data.settings.alwaysOnTop = !data.settings.alwaysOnTop
-    widget?.setAlwaysOnTop(data.settings.alwaysOnTop)
-    writeData(); createTray(); broadcastSnapshot()
-  })
-  ipcMain.handle('window:compact', (event, value: unknown) => {
-    if (!isValidSender(event) || typeof value !== 'boolean') return
-    data.settings.compactWidget = value
-    widget?.setBounds(widgetBounds()); writeData(); broadcastSnapshot()
-  })
+  handle<void>('window:dashboard', undefined, () => openDashboard())
+  handle<void>('window:widget', undefined, () => showWidget())
+  handle<void>('window:minimize', undefined, () => { dashboard?.hide() })
+  handle<void>('window:close', undefined, () => { dashboard?.hide() })
+  handle<void>('window:topmost', undefined, () => applySettings({ ...data.settings, alwaysOnTop: !data.settings.alwaysOnTop }))
+  handle<void>('window:compact', undefined, (_event, value: unknown) => { if (typeof value === 'boolean') applySettings({ ...data.settings, compactWidget: value }) })
+  handle('hardware:get', EMPTY_HARDWARE, () => data.settings.hardwareMonitor ? validateHardwareSnapshot(lastHardware) ?? EMPTY_HARDWARE : EMPTY_HARDWARE)
+  handle<void>('hardware:retry', undefined, () => { if (data.settings.hardwareMonitor) { ensureHardware().start(); hardware?.retry() } })
+  handle<AppStatus | null>('app:status', null, () => appStatus())
+  handle<void>('app:open-logs', undefined, async () => { await shell.openPath(logger.directory) })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------------------------------------------------
+
+function requestQuit() {
+  quit.request()
+  app.quit()
+}
+
+function installProcessGuards() {
+  const burst = new RestartBudget(3, 60_000)
+  const onFatal = (label: string, error: unknown) => {
+    logger.error(label, error)
+    // Individual exceptions are logged and survived. A burst means the process is in a bad state: relaunch once, bounded.
+    if (!burst.tryConsume() && data.settings.crashRecovery && !quit.isQuitting && sentinel.canRelaunch()) {
+      logger.error('Repeated main-process errors; relaunching FocusFlow (bounded)')
+      sentinel.recordRelaunch()
+      store.flush()
+      app.relaunch({ args: [...process.argv.slice(1).filter(arg => arg !== '--recovered'), '--recovered'] })
+      quit.request()
+      app.exit(1)
+    }
+  }
+  process.on('uncaughtException', error => onFatal('Uncaught exception in the main process', error))
+  process.on('unhandledRejection', reason => onFatal('Unhandled promise rejection in the main process', reason))
+  app.on('child-process-gone', (_event, details) => logger.error(`Child process gone: ${details.type} (${details.reason}, exit ${details.exitCode})`))
+}
+
+function boot() {
+  const userData = app.getPath('userData')
+  logger = createLogger({ directory: path.join(userData, 'logs') })
+  store = new JsonStore({ directory: userData, logger })
+  sentinel = new SessionSentinel(path.join(userData, 'session.json'))
+  logger.info(`FocusFlow ${app.getVersion()} starting (packaged=${app.isPackaged}, hidden=${launchedHidden}, electron=${process.versions.electron})`)
+  try { crashReporter.start({ uploadToServer: false, compress: true }) } catch (error) { logger.warn('Local crash dumps unavailable', error) }
+  installProcessGuards()
+  const session_ = sentinel.begin(process.pid)
+  previousSessionCrashed = session_.previousCrashed
+  if (previousSessionCrashed) logger.warn(`The previous session did not exit cleanly (started ${new Date(session_.previousStartedAt ?? 0).toISOString()})`)
+
+  loadData()
+  if (data.settings.launchAtStartup && startupStatus().supported && !startupStatus().enabled) applyLoginItem()
+  if (app.isPackaged) Menu.setApplicationMenu(null)
+  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+
+  registerIpc()
+  createDashboard()
+  createWidget()
+  createTray()
+  tick(true)
+  tickHandle = setInterval(() => tick(false), 1000)
+
+  powerMonitor.on('suspend', () => { suspended = true; syncHardware() })
+  const resumed = () => {
+    suspended = false
+    engine.markResumed()
+    tick(true)
+    syncHardware()
+    hardware?.retry()
+  }
+  powerMonitor.on('resume', resumed)
+  powerMonitor.on('unlock-screen', () => { engine.markResumed(); tick(true) })
+  screen.on('display-metrics-changed', refitWindows)
+  screen.on('display-added', refitWindows)
+  screen.on('display-removed', refitWindows)
+  nativeTheme.on('updated', refreshTrayIcon)
+  syncHardware()
+
+  if (process.env.FOCUSFLOW_SMOKE) {
+    void runSmoke(process.env.FOCUSFLOW_SMOKE, {
+      app, logger, trayReport: () => trayReport, tray: () => tray, dashboard: () => dashboard, widget: () => widget,
+      hardware: () => lastHardware, data: () => data, startupStatus, applyLoginItem: (enabled: boolean) => { data.settings.launchAtStartup = enabled; applyLoginItem() },
+      launchedHidden, quit: () => requestQuit(), userData,
+    })
+  }
 }
 
 app.setAppUserModelId('br.com.focusflow.desktop')
-app.on('before-quit', () => { isQuitting = true })
-if (!app.requestSingleInstanceLock()) app.quit()
-else {
-  app.on('second-instance', () => openDashboard())
-  app.whenReady().then(() => {
-    data = readData()
-    app.setLoginItemSettings({ openAtLogin: app.isPackaged && data.settings.launchAtStartup })
-    registerIpc()
-    createDashboard(); createWidget(); createTray()
-    runEngine(true)
-    tickHandle = setInterval(() => runEngine(false), 1000)
-    powerMonitor.on('resume', () => runEngine(true))
-    app.on('activate', openDashboard)
+app.on('before-quit', () => quit.request())
+// Windows (dashboard, widget) are hidden rather than closed; even if both disappear the tray keeps the app alive.
+app.on('window-all-closed', () => undefined)
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => { if (loaded) openDashboard() })
+  app.on('activate', () => { if (loaded) openDashboard() })
+  app.whenReady().then(boot).catch(error => {
+    // Bootstrapping failed: record it and leave cleanly instead of a half-initialised process.
+    try { logger?.error('FocusFlow failed to start', error) } catch { /* no logger yet */ }
+    quit.request()
+    app.exit(1)
   })
 }
 
-app.on('will-quit', () => { if (tickHandle) clearInterval(tickHandle); if (boundsSaveHandle) clearTimeout(boundsSaveHandle); writeData(); tray?.destroy() })
+app.on('will-quit', () => {
+  if (tickHandle) clearInterval(tickHandle)
+  if (displayTimer) clearTimeout(displayTimer)
+  if (!loaded) return // a second instance must never touch the real configuration
+  try { store.flush(); store.dispose() } catch (error) { logger.error('Final save failed', error) }
+  hardware?.stop()
+  sentinel.end()
+  logger.info('FocusFlow exited cleanly')
+  if (tray && !tray.isDestroyed()) tray.destroy()
+})

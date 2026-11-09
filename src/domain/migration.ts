@@ -1,19 +1,10 @@
-import { isRect, Rect } from '../../electron/bounds'
-import { Activity, AppSettings, DEFAULT_RUNTIME, DEFAULT_SCHEDULE, DEFAULT_SETTINGS, RuntimeState, SATURDAY_SCHEDULE, ScheduleSet } from '../../electron/shared'
+import { isRect } from '../../electron/bounds'
+import { Activity, AppData, AppSettings, DEFAULT_RUNTIME, DEFAULT_SCHEDULE, DEFAULT_SETTINGS, RuntimeState, SATURDAY_SCHEDULE } from '../../electron/shared'
 import { MAX_NAME_LENGTH, validateSchedule } from './schedule'
 
 export const DATA_VERSION = 2
 
-export type PersistedData = {
-  version: typeof DATA_VERSION
-  schedules: ScheduleSet
-  settings: AppSettings
-  runtime: RuntimeState
-  widgetBounds?: Rect
-  dashboardBounds?: Rect & { maximized?: boolean }
-  /** Whether the user last left the floating widget visible. */
-  widgetVisible: boolean
-}
+export type PersistedData = AppData
 
 export type MigrationResult = {
   data: PersistedData
@@ -118,7 +109,7 @@ export function migrateData(raw: unknown): MigrationResult {
 
   const widgetBounds = isRect(raw.widgetBounds) ? { x: raw.widgetBounds.x, y: raw.widgetBounds.y, width: raw.widgetBounds.width, height: raw.widgetBounds.height } : undefined
   const dash = raw.dashboardBounds
-  const dashboardBounds = isRect(dash) ? { x: dash.x, y: dash.y, width: dash.width, height: dash.height, ...(isObject(dash) && dash.maximized === true ? { maximized: true } : {}) } : undefined
+  const dashboardBounds = isRect(dash) ? { x: dash.x, y: dash.y, width: dash.width, height: dash.height, ...((dash as { maximized?: unknown }).maximized === true ? { maximized: true } : {}) } : undefined
 
   const data: PersistedData = {
     version: DATA_VERSION,
@@ -134,3 +125,18 @@ export function migrateData(raw: unknown): MigrationResult {
 
 /** True when the stored version differs from the current one and the original should be preserved before rewriting. */
 export const needsMigrationBackup = (result: MigrationResult) => result.migratedFrom !== null && (result.migratedFrom !== DATA_VERSION || result.repaired)
+
+const ICON_LIMIT = 24
+
+/** Strict, message-bearing validation of an agenda received over IPC. Never throws on hostile input. */
+export function parseActivities(value: unknown): { activities: Activity[] } | { error: string } {
+  if (!Array.isArray(value)) return { error: 'Agenda inválida.' }
+  for (const item of value) {
+    if (!isObject(item) || typeof item.id !== 'string' || typeof item.name !== 'string' || typeof item.start !== 'string' || typeof item.end !== 'string') return { error: 'Agenda inválida.' }
+    if (typeof item.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(item.color) || typeof item.icon !== 'string' || item.icon.length > ICON_LIMIT) return { error: 'Confira a cor e o ícone de cada atividade.' }
+  }
+  const items = value as Activity[]
+  const error = validateSchedule(items)
+  if (error) return { error }
+  return { activities: items.map(({ id, name, start, end, color, icon }) => ({ id, name, start, end, color, icon })).sort((a, b) => a.start.localeCompare(b.start)) }
+}
