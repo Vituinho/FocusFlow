@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fitBoundsToDisplays, isRect } from './bounds'
+import { fitBoundsToDisplays, isRect, minimumSizeFor } from './bounds'
 
 const primary = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1040 } }
 const right = { id: 2, workArea: { x: 1920, y: 0, width: 1280, height: 984 } }
@@ -44,5 +44,13 @@ describe('fitBoundsToDisplays', () => {
     expect(isRect({ x: 1, y: 2, width: 3, height: 4 })).toBe(true)
     expect(isRect({ x: 1, y: 2, width: 0, height: 4 })).toBe(false)
     expect(isRect(null)).toBe(false)
+  })
+})
+
+describe('minimumSizeFor (regression: dashboard larger than the work area at 200-300 % scaling)', () => {
+  it('keeps the normal minimum on a large work area and shrinks it on a small one', () => {
+    expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 1920, height: 1040 })).toEqual({ width: 880, height: 650 })
+    expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 800, height: 426 })).toEqual({ width: 800, height: 426 })
+    expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 534.7, height: 284.2 })).toEqual({ width: 534, height: 284 })
   })
 })

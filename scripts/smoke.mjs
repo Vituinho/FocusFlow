@@ -10,6 +10,7 @@
 //   --startup         toggle the Run registration (isolated AppUserModelID) and restore it
 //   --startup-keep    leave the isolated registration enabled (for uninstall tests)
 //   --crash           kill the widget renderer and expect bounded recovery
+//   --dpi=N           force a device scale factor of N (simulates a DPI scaling change; windows must still fit the work area)
 //   --offscreen       seed window bounds far outside every display (as after unplugging a monitor)
 //   --stall=SECONDS   suspend the main process for SECONDS from outside (like sleep/resume) and check stall handling
 //   --soak=SECONDS    bounded stress loop (hide/show, settings, hardware toggles, worker kills) with CPU/RAM/timer sampling
@@ -36,6 +37,8 @@ const sleep = ms => new Promise(done => setTimeout(done, ms))
 const command = exeArg ? resolve(exeArg) : require('electron')
 const commandArgs = exeArg ? [] : [root]
 if (flags.has('--hidden') || flags.has('--hidden-all')) commandArgs.push('--hidden')
+const dpi = flagValue('--dpi')
+if (dpi) commandArgs.push(`--force-device-scale-factor=${dpi}`)
 
 const work = mkdtempSync(join(tmpdir(), 'focusflow-smoke-'))
 const reportPath = join(work, 'report.json')
@@ -126,6 +129,7 @@ if (hiddenAll) {
   if (flags.has('--hidden')) check('dashboard hidden on a start with Windows', report.windows?.dashboard?.visible === false)
   else check('dashboard visible on a normal start', report.windows?.dashboard?.visible === true)
 }
+if (dpi) { check(`dashboard fits the work area at scale factor ${dpi}`, report.displays?.dashboardInsideWorkArea === true); check(`widget fits the work area at scale factor ${dpi}`, report.displays?.widgetInsideWorkArea === true) }
 if (flags.has('--offscreen')) { check('dashboard moved back inside a display work area', report.displays?.dashboardInsideWorkArea === true); check('widget moved back inside a display work area', report.displays?.widgetInsideWorkArea === true) }
 if (flags.has('--startup')) check('startup registration toggles', report.startup?.enabled?.enabled === true && report.startup?.after?.enabled === false)
 if (flags.has('--startup-keep')) check('startup registration enabled and left in place', report.startup?.enabled?.enabled === true)

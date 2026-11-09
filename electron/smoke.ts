@@ -52,7 +52,8 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
       widget: widget && !widget.isDestroyed() ? { visible: widget.isVisible(), bounds: widget.getBounds(), url: widget.webContents.getURL() } : null,
     }
     const displays = screen.getAllDisplays().map(display => ({ id: display.id, scale: display.scaleFactor, workArea: display.workArea }))
-    const inside = (rect: { x: number; y: number; width: number; height: number } | undefined) => !!rect && displays.some(display => rect.x >= display.workArea.x && rect.y >= display.workArea.y && rect.x + rect.width <= display.workArea.x + display.workArea.width && rect.y + rect.height <= display.workArea.y + display.workArea.height)
+    // 2 DIP of tolerance: fractional scale factors round window sizes to whole device pixels.
+    const inside = (rect: { x: number; y: number; width: number; height: number } | undefined) => !!rect && displays.some(display => rect.x >= display.workArea.x - 2 && rect.y >= display.workArea.y - 2 && rect.x + rect.width <= display.workArea.x + display.workArea.width + 2 && rect.y + rect.height <= display.workArea.y + display.workArea.height + 2)
     report.displays = { count: displays.length, list: displays, dashboardInsideWorkArea: inside(dashboard?.getBounds()), widgetInsideWorkArea: inside(widget?.getBounds()) }
     const settings = ctx.data().settings
     report.settings = { workingDays: settings.workingDays, hardwareMonitor: settings.hardwareMonitor, launchAtStartup: settings.launchAtStartup }

@@ -44,3 +44,8 @@ export function fitBoundsToDisplays(saved: Rect | undefined, displays: DisplayIn
     width, height,
   }
 }
+
+/** A window's minimum size can never exceed the work area it lives on (high DPI scaling shrinks the work area in DIPs). */
+export function minimumSizeFor(minimum: { width: number; height: number }, workArea: Rect): { width: number; height: number } {
+  return { width: Math.max(1, Math.min(minimum.width, Math.floor(workArea.width))), height: Math.max(1, Math.min(minimum.height, Math.floor(workArea.height))) }
+}

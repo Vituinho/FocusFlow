@@ -2,7 +2,7 @@ import { app, BrowserWindow, crashReporter, ipcMain, Menu, nativeTheme, Notifica
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fitBoundsToDisplays, isRect, Rect } from './bounds'
+import { fitBoundsToDisplays, isRect, minimumSizeFor, Rect } from './bounds'
 import { HardwareMonitor } from './hardware'
 import { sumCpuTimes } from './hardwareParse'
 import { EMPTY_HARDWARE, HardwareSnapshot, validateHardwareSnapshot } from './hardwareTypes'
@@ -206,8 +206,13 @@ function widgetRect(): Rect {
   return fitBoundsToDisplays(saved, displays(), primaryDisplay(), size)
 }
 
+const DASHBOARD_MINIMUM = { width: 880, height: 650 }
+
+/** Minimum window size adapted to the display the dashboard will be on, so it can always fit. */
+function dashboardMinimum(rect: Rect) { return minimumSizeFor(DASHBOARD_MINIMUM, screen.getDisplayMatching(rect).workArea) }
+
 function dashboardRect(): Rect {
-  return fitBoundsToDisplays(data.dashboardBounds, displays(), primaryDisplay(), { width: 1220, height: 820 }, { width: 880, height: 650 })
+  return fitBoundsToDisplays(data.dashboardBounds, displays(), primaryDisplay(), { width: 1220, height: 820 }, DASHBOARD_MINIMUM)
 }
 
 function webPreferences() {
@@ -282,7 +287,7 @@ function saveDashboardBounds() {
 function createDashboard() {
   const rect = dashboardRect()
   const window = new BrowserWindow({
-    ...rect, minWidth: 880, minHeight: 650, title: 'FocusFlow', backgroundColor: '#101317', show: false,
+    ...rect, minWidth: dashboardMinimum(rect).width, minHeight: dashboardMinimum(rect).height, title: 'FocusFlow', backgroundColor: '#101317', show: false,
     titleBarStyle: 'hidden', autoHideMenuBar: true, webPreferences: webPreferences(),
   })
   dashboard = window
@@ -361,7 +366,12 @@ function refitWindows() {
   displayTimer = setTimeout(() => {
     try {
       if (widget && !widget.isDestroyed()) widget.setBounds(widgetRect())
-      if (dashboard && !dashboard.isDestroyed() && !dashboard.isMaximized() && !dashboard.isMinimized()) dashboard.setBounds(dashboardRect())
+      if (dashboard && !dashboard.isDestroyed() && !dashboard.isMaximized() && !dashboard.isMinimized()) {
+        const rect = dashboardRect()
+        const minimum = dashboardMinimum(rect)
+        dashboard.setMinimumSize(minimum.width, minimum.height)
+        dashboard.setBounds(rect)
+      }
       refreshTrayIcon()
     } catch (error) { logger.warn('Could not re-fit windows after a display change', error) }
   }, 400)
