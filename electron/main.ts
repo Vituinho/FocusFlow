@@ -562,18 +562,19 @@ function installProcessGuards() {
 }
 
 function boot() {
+  const bootStarted = Date.now()
   const userData = app.getPath('userData')
   logger = createLogger({ directory: path.join(userData, 'logs') })
   store = new JsonStore({ directory: userData, logger })
   sentinel = new SessionSentinel(path.join(userData, 'session.json'))
   logger.info(`FocusFlow ${app.getVersion()} starting (packaged=${app.isPackaged}, hidden=${launchedHidden}, electron=${process.versions.electron})`)
-  try { crashReporter.start({ uploadToServer: false, compress: true }) } catch (error) { logger.warn('Local crash dumps unavailable', error) }
   installProcessGuards()
   const session_ = sentinel.begin(process.pid)
   previousSessionCrashed = session_.previousCrashed
   if (previousSessionCrashed) logger.warn(`The previous session did not exit cleanly (started ${new Date(session_.previousStartedAt ?? 0).toISOString()})`)
 
   loadData()
+  logger.info(`Startup: configuration ready after ${Date.now() - bootStarted} ms`)
   if (data.settings.launchAtStartup && startupStatus().supported && !startupStatus().enabled) applyLoginItem()
   if (app.isPackaged) Menu.setApplicationMenu(null)
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
@@ -582,6 +583,9 @@ function boot() {
   createDashboard()
   createWidget()
   createTray()
+  logger.info(`Startup: windows and tray created after ${Date.now() - bootStarted} ms`)
+  // Local-only minidumps (nothing is uploaded). Started after the windows are up so it can never delay startup.
+  setTimeout(() => { try { crashReporter.start({ uploadToServer: false, compress: true }) } catch (error) { logger.warn('Local crash dumps unavailable', error) } }, 5000).unref()
   tick(true)
   tickHandle = setInterval(() => tick(false), 1000)
 

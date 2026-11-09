@@ -3,7 +3,7 @@
 //
 //   node scripts/smoke.mjs                       dev build (run `npm run build` first)
 //   node scripts/smoke.mjs <path-to-exe>         packaged app (win-unpacked\FocusFlow.exe or the portable exe)
-//   options: --hidden (simulate a start with Windows) --startup (toggle the Run registration and restore it) --crash (kill the widget renderer)
+//   options: --hidden (simulate a start with Windows) --startup (toggle the Run registration and restore it) --startup-keep (leave it enabled) --crash (kill the widget renderer)
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -27,6 +27,7 @@ const userData = join(work, 'userdata')
 if (process.env.SMOKE_SEED_V1) writeFileSync(join(work, 'seed.json'), readFileSync(process.env.SMOKE_SEED_V1))
 const env = { ...process.env, FOCUSFLOW_SMOKE: reportPath, FOCUSFLOW_USER_DATA: userData }
 if (flags.has('--startup')) env.FOCUSFLOW_SMOKE_STARTUP = '1'
+if (flags.has('--startup-keep')) env.FOCUSFLOW_SMOKE_STARTUP = 'keep'
 if (flags.has('--crash')) env.FOCUSFLOW_SMOKE_CRASH = '1'
 if (process.env.SMOKE_SHOTS) env.FOCUSFLOW_SMOKE_SHOTS = process.env.SMOKE_SHOTS
 delete env.ELECTRON_RUN_AS_NODE
@@ -62,10 +63,16 @@ const checks = [
 if (flags.has('--hidden')) checks.push(['dashboard hidden on a start with Windows', report.windows?.dashboard?.visible === false])
 else checks.push(['dashboard visible on a normal start', report.windows?.dashboard?.visible === true])
 if (flags.has('--startup')) checks.push(['startup registration toggles', report.startup?.enabled?.enabled === true && report.startup?.after?.enabled === false])
+if (flags.has('--startup-keep')) checks.push(['startup registration enabled and left in place', report.startup?.enabled?.enabled === true])
 if (flags.has('--crash')) checks.push(['widget renderer recovered after a crash', report.crashRecovery?.reloadedAfterCrash === true && report.crashRecovery?.stillAlive === true])
 
+if (process.env.SMOKE_SEED_V1) {
+  checks.push(['v1 customised weekday agenda preserved', report.weekdayAgenda?.[0]?.includes('Foco profundo') && report.weekdayAgenda.length === 3])
+  checks.push(['v1 original kept as a migration backup', report.migrationFiles?.some(name => name.includes('.v1.') && name.endsWith('.bak.json'))])
+  checks.push(['v1 theme/settings preserved', report.settings?.hardwareMonitor === true])
+}
 let failed = 0
 for (const [name, ok] of checks) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`); if (!ok) failed++ }
-if (failed) console.log(`Data and logs kept for inspection: ${userData}`)
+if (failed || process.env.SMOKE_KEEP) console.log(`Data and logs kept for inspection: ${userData}`)
 else { try { rmSync(work, { recursive: true, force: true }) } catch { /* temp folder cleanup is best effort */ } }
 process.exit(failed ? 1 : 0)

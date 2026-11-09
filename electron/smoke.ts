@@ -48,13 +48,16 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
     const settings = ctx.data().settings
     report.settings = { workingDays: settings.workingDays, hardwareMonitor: settings.hardwareMonitor, launchAtStartup: settings.launchAtStartup }
     report.dataVersion = ctx.data().version
+    report.weekdayAgenda = ctx.data().schedules.weekday.map(item => `${item.start}-${item.end} ${item.name}`)
+    report.migrationFiles = fs.readdirSync(ctx.userData).filter(name => name.startsWith('focusflow.'))
     report.saturdayAgenda = ctx.data().schedules.saturday.map(item => `${item.start}-${item.end} ${item.name}`)
 
     if (process.env.FOCUSFLOW_SMOKE_STARTUP) {
       const before = ctx.startupStatus()
       ctx.applyLoginItem(true)
       const enabled = ctx.startupStatus()
-      ctx.applyLoginItem(false)
+      // `keep` leaves the registration in place so an uninstall test can prove the uninstaller removes it.
+      if (process.env.FOCUSFLOW_SMOKE_STARTUP !== 'keep') ctx.applyLoginItem(false)
       report.startup = { before, enabled, after: ctx.startupStatus() }
     } else report.startup = ctx.startupStatus()
 
