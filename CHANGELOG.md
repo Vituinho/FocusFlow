@@ -9,7 +9,8 @@
 - **System status** in Settings: version, start-with-Windows state (including "disabled by Windows"), recoveries, recent warnings/errors and a button that opens the local log folder.
 - Tray menu: status line, show/hide widget, notifications, hardware monitor, reload windows, open logs. Single click, double click and right click are supported.
 - Local rotating log (`logs/focusflow.log` in the data folder, 3 x 512 KB) and local crash dumps. Nothing is uploaded.
-- Real-app smoke check: `node scripts/smoke.mjs [exe] [--hidden] [--startup] [--crash]`.
+- Real-app smoke check: `node scripts/smoke.mjs [exe] [--hidden|--hidden-all|--startup|--startup-keep|--crash|--offscreen|--dpi=N|--stall=S|--soak=S|--double|--real-userdata]` and `node scripts/validate-hardware.mjs` (accuracy against Windows' own counters and sampler overhead).
+- `docs/crash-recovery.md`: analysis and measurements for recovering from a hard main-process crash.
 
 ### Fixed
 - **Data loss:** launching a second instance made the exiting process write default data over `focusflow.json`. Only the instance that loaded the configuration can write it now.
@@ -23,6 +24,8 @@
 - Closing the window during Windows logoff/shutdown no longer blocks the session end.
 - Corrupt `focusflow.json` is quarantined (`focusflow.corrupt.<time>.json`) instead of being silently replaced by defaults.
 - Windows are shown even when Chromium's `ready-to-show` event is late or never fires (observed on a heavily loaded machine), instead of staying hidden forever. Page load time and renderer errors are written to the local log.
+- The dashboard can shrink below its 880x650 minimum on small work areas, so it no longer overflows the screen at 200-300 % scaling.
+- The hardware sampler exits by itself when its parent process is gone (it now checks the parent every 5 s), so a crash cannot leave an orphaned PowerShell process.
 - Validated IPC: sender frame checks, strict agenda parsing (no exceptions on hostile input) and denied web permissions.
 
 ### Reliability

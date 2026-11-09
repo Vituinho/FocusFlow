@@ -78,4 +78,4 @@ O instalador NSIS será criado em `release-win/FocusFlow-Setup-1.1.0.exe`. Para 
 - A opção de início automático grava a preferência de inicialização do Windows (abre minimizado na bandeja) e pode ser controlada em Configurações; o Windows também pode desativá-la em Configurações › Aplicativos › Inicialização, e o status mostra isso. O desinstalador remove o registro.
 - O monitor de hardware lê contadores de desempenho do Windows por um único processo PowerShell oculto, apenas enquanto uma janela está visível. Sem rede, sem telemetria. GPU/disco indisponíveis aparecem como `N/D`.
 - Logs ficam em `%APPDATA%FocusFlowlogs`. Se o arquivo de dados estiver corrompido, ele é preservado como `focusflow.corrupt.<hora>.json` e o último backup válido é usado.
-- Não há serviço nem tarefa agendada de reinício: a recuperação é feita pelo próprio aplicativo, com limites (veja o CHANGELOG).
+- Não há serviço nem tarefa agendada de reinício: a recuperação é feita pelo próprio aplicativo, com limites (veja o CHANGELOG e `docs/crash-recovery.md`).
