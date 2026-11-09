@@ -22,6 +22,7 @@
 - The main process no longer broadcasts a snapshot every second; renderers stop their clock while hidden in the tray.
 - Closing the window during Windows logoff/shutdown no longer blocks the session end.
 - Corrupt `focusflow.json` is quarantined (`focusflow.corrupt.<time>.json`) instead of being silently replaced by defaults.
+- Windows are shown even when Chromium's `ready-to-show` event is late or never fires (observed on a heavily loaded machine), instead of staying hidden forever. Page load time and renderer errors are written to the local log.
 - Validated IPC: sender frame checks, strict agenda parsing (no exceptions on hostile input) and denied web permissions.
 
 ### Reliability
@@ -30,7 +31,7 @@
 - Window positions are restored per monitor and re-fitted after DPI, resolution or monitor changes. The dashboard size/position/maximised state is now remembered.
 - Renderer crash, hang and load-failure recovery with exponential backoff and a budget (3 per 5 minutes per window), then a notification and a manual "Reload windows" action. No recovery after an intentional quit.
 - Crash sentinel: the next start knows whether the previous session ended unexpectedly. After repeated main-process errors the app relaunches itself once at a time, at most 3 times in 10 minutes, only when "Automatic recovery" is on and never after Quit.
-- Start with Windows launches minimized to the tray (`--hidden`), works for the portable build, restores state after sleep/resume and is removed by the uninstaller.
+- Start with Windows launches minimized to the tray (`--hidden`), works for the portable build, restores state after sleep/resume and is removed by the uninstaller. It reuses the registry value created by 1.0.x, so an existing registration is updated in place without duplicates.
 
 ### Notes
 - No OS-level watchdog (scheduled task or service) is installed: it would need elevated rights, would have to be cleaned up on uninstall and cannot distinguish a crash from a quit reliably. In-app bounded recovery is used instead. A hard native crash of the main process is only recovered at the next login (if start with Windows is on) or the next manual launch.
