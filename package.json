@@ -13,7 +13,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
     "test": "vitest run",
     "package:win": "npm run build && electron-builder --win nsis",
-    "package:portable": "npm run build && electron-builder --win portable"
+    "package:portable": "npm run build && electron-builder --win portable",
+    "package:all": "npm run build && electron-builder --win nsis portable",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -37,17 +39,49 @@
     "appId": "br.com.focusflow.desktop",
     "productName": "FocusFlow",
     "asar": true,
-    "directories": { "output": "release-win" },
-    "files": ["dist/**", "dist-electron/**", "package.json"],
-    "win": { "icon": "build/icon.ico", "target": ["nsis"], "artifactName": "FocusFlow-Setup-${version}.${ext}" },
+    "directories": {
+      "output": "release-win"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "language": "1046",
-      "installerLanguages": ["pt_BR"],
-      "shortcutName": "FocusFlow"
+      "installerLanguages": [
+        "pt_BR"
+      ],
+      "shortcutName": "FocusFlow",
+      "artifactName": "FocusFlow-Setup-${version}.${ext}",
+      "include": "build/installer.nsh"
+    },
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icons/icon.ico"
+      },
+      {
+        "from": "build/tray",
+        "to": "icons/tray",
+        "filter": [
+          "*.png"
+        ]
+      }
+    ],
+    "portable": {
+      "artifactName": "FocusFlow-Portable-${version}.${ext}"
     }
   }
 }
