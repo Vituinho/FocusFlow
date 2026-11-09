@@ -79,3 +79,12 @@ export function formatBytes(value: number | null): string {
   while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++ }
   return `${size >= 100 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`
 }
+
+/** Hardware data older than this is shown as N/D instead of a stale number (e.g. after the sampler stalled). */
+export const HARDWARE_STALE_MS = 20_000
+
+export function freshHardware(snapshot: HardwareSnapshot | null, now: number): HardwareSnapshot {
+  if (!snapshot) return EMPTY_HARDWARE
+  if (snapshot.status === 'off' || snapshot.status === 'starting' || now - snapshot.timestamp <= HARDWARE_STALE_MS) return snapshot
+  return { ...snapshot, status: 'degraded', cpu: null, ram: { ...snapshot.ram, percent: null }, gpu: { percent: null, adapters: [] }, disk: { ...snapshot.disk, activityPercent: null }, notes: ['Sem atualização recente'] }
+}
