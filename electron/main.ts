@@ -26,7 +26,6 @@ import { runSmoke } from './smoke'
 const devUrl = process.env.VITE_DEV_SERVER_URL
 const launchedHidden = process.argv.includes('--hidden')
 const LOGIN_ARGS = ['--hidden']
-const LOGIN_NAME = 'FocusFlow'
 const isDevelopment = !app.isPackaged
 
 // The interface is Brazilian Portuguese: make native controls (24-hour time pickers, date formats) match it on any system language.
@@ -222,6 +221,34 @@ function watchRenderer(name: 'dashboard' | 'widget', window: BrowserWindow) {
   })
 }
 
+/** Records page load timing and renderer errors in the local log; invaluable when a window stays blank. */
+function logRendererEvents(name: string, window: BrowserWindow) {
+  const started = Date.now()
+  window.webContents.on('did-finish-load', () => logger.info(`${name}: page loaded after ${Date.now() - started} ms`))
+  window.once('ready-to-show', () => logger.info(`${name}: ready-to-show event after ${Date.now() - started} ms`))
+  window.webContents.on('console-message', event => {
+    const { level, message, sourceId, lineNumber } = event as unknown as { level: string | number; message: string; sourceId: string; lineNumber: number }
+    if (level === 'error' || level === 3) logger.warn(`${name}: renderer error: ${String(message).slice(0, 300)} (${String(sourceId).split('/').pop()}:${lineNumber})`)
+  })
+}
+
+/**
+ * Runs `show` once the page is ready. Chromium normally emits ready-to-show, but on a loaded machine it can be very late or
+ * missing, which would leave the window hidden forever; page load and a hard timeout are therefore fallbacks.
+ */
+function showWhenReady(name: string, window: BrowserWindow, show: () => void) {
+  let done = false
+  const go = (reason: string) => {
+    if (done || window.isDestroyed()) return
+    done = true
+    logger.info(`${name}: shown (${reason})`)
+    show()
+  }
+  window.once('ready-to-show', () => go('ready-to-show'))
+  window.webContents.once('did-finish-load', () => { setTimeout(() => go('did-finish-load'), 1500).unref() })
+  setTimeout(() => go('timeout'), 6000).unref()
+}
+
 function trackVisibility(window: BrowserWindow) {
   const changed = () => { syncHardware(); updateTray() }
   window.on('show', changed)
@@ -247,9 +274,10 @@ function createDashboard() {
   dashboard = window
   guardWindow(window)
   watchRenderer('dashboard', window)
+  logRendererEvents('dashboard', window)
   attachCloseToTray(window, quit, saveDashboardBounds)
   trackVisibility(window)
-  window.once('ready-to-show', () => {
+  showWhenReady('dashboard', window, () => {
     if (data.dashboardBounds?.maximized) window.maximize()
     if (!launchedHidden || recoveriesShouldShow) window.show()
   })
@@ -268,9 +296,10 @@ function createWidget() {
   widget = window
   guardWindow(window)
   watchRenderer('widget', window)
+  logRendererEvents('widget', window)
   attachCloseToTray(window, quit)
   trackVisibility(window)
-  window.once('ready-to-show', () => { if (data.widgetVisible) window.showInactive() })
+  showWhenReady('widget', window, () => { if (data.widgetVisible) window.showInactive() })
   window.on('moved', () => {
     if (window.isDestroyed()) return
     data.widgetBounds = window.getBounds()
@@ -404,7 +433,7 @@ const loginExecutable = () => process.env.PORTABLE_EXECUTABLE_FILE || process.ex
 function startupStatus(): StartupStatus {
   if (!app.isPackaged || process.platform !== 'win32') return { supported: false, enabled: false, willLaunch: false }
   try {
-    const settings = app.getLoginItemSettings({ path: loginExecutable(), args: LOGIN_ARGS, name: LOGIN_NAME } as Electron.LoginItemSettingsOptions)
+    const settings = app.getLoginItemSettings({ path: loginExecutable(), args: LOGIN_ARGS })
     return { supported: true, enabled: settings.openAtLogin, willLaunch: settings.executableWillLaunchAtLogin ?? settings.openAtLogin }
   } catch (error) { logger.warn('Could not read the startup registration', error); return { supported: true, enabled: false, willLaunch: false } }
 }
@@ -412,7 +441,7 @@ function startupStatus(): StartupStatus {
 function applyLoginItem() {
   if (!app.isPackaged || process.platform !== 'win32') return
   try {
-    app.setLoginItemSettings({ openAtLogin: data.settings.launchAtStartup, path: loginExecutable(), args: LOGIN_ARGS, name: LOGIN_NAME } as Electron.Settings)
+    app.setLoginItemSettings({ openAtLogin: data.settings.launchAtStartup, path: loginExecutable(), args: LOGIN_ARGS })
   } catch (error) { logger.error('Could not update the Windows startup registration', error) }
 }
 
@@ -614,7 +643,9 @@ function boot() {
   }
 }
 
-app.setAppUserModelId('br.com.focusflow.desktop')
+// The Run registry value is named after the AppUserModelID, exactly like 1.0.x, so an existing registration is updated in place
+// (no duplicate entries). The startup smoke test uses its own id so it can never touch a real registration.
+app.setAppUserModelId(process.env.FOCUSFLOW_SMOKE_STARTUP ? 'br.com.focusflow.desktop.smoketest' : 'br.com.focusflow.desktop')
 app.on('before-quit', () => quit.request())
 // Windows (dashboard, widget) are hidden rather than closed; even if both disappear the tray keeps the app alive.
 app.on('window-all-closed', () => undefined)
