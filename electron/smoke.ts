@@ -1,8 +1,11 @@
+import { screen } from 'electron'
 import type { App, BrowserWindow, Tray } from 'electron'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import type { HardwareSnapshot } from './hardwareTypes'
 import type { Logger } from './logger'
 import type { AppData, StartupStatus } from './shared'
+import { runSoak, SoakActions, workerProcesses } from './soak'
 import type { TrayIconReport } from './trayIcon'
 
 export type SmokeContext = {
@@ -19,6 +22,8 @@ export type SmokeContext = {
   launchedHidden: boolean
   quit: () => void
   userData: string
+  stats: { ticks: number; maxGapMs: number; stalls: number; notifications: number }
+  actions: SoakActions
 }
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -34,8 +39,9 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
     ctx.app.getAppMetrics() // reset the CPU counters
     await wait(2500)
     // Cold starts (first run after an install, antivirus scans) can be slow: wait for the windows instead of racing them.
-    for (let index = 0; index < 40 && !(ctx.widget()?.isVisible() ?? false); index++) await wait(500)
-    if (!ctx.launchedHidden) for (let index = 0; index < 40 && !(ctx.dashboard()?.isVisible() ?? false); index++) await wait(500)
+    const expectHidden = !!process.env.FOCUSFLOW_SMOKE_EXPECT_HIDDEN
+    if (!expectHidden) for (let index = 0; index < 40 && !(ctx.widget()?.isVisible() ?? false); index++) await wait(500)
+    if (!ctx.launchedHidden && !expectHidden) for (let index = 0; index < 40 && !(ctx.dashboard()?.isVisible() ?? false); index++) await wait(500)
     const tray = ctx.tray()
     const trayReport = ctx.trayReport()
     report.tray = { created: !!tray && !tray.isDestroyed(), icon: trayReport, bounds: tray && !tray.isDestroyed() ? tray.getBounds() : null }
@@ -45,6 +51,9 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
       dashboard: dashboard && !dashboard.isDestroyed() ? { visible: dashboard.isVisible(), bounds: dashboard.getBounds(), url: dashboard.webContents.getURL() } : null,
       widget: widget && !widget.isDestroyed() ? { visible: widget.isVisible(), bounds: widget.getBounds(), url: widget.webContents.getURL() } : null,
     }
+    const displays = screen.getAllDisplays().map(display => ({ id: display.id, scale: display.scaleFactor, workArea: display.workArea }))
+    const inside = (rect: { x: number; y: number; width: number; height: number } | undefined) => !!rect && displays.some(display => rect.x >= display.workArea.x && rect.y >= display.workArea.y && rect.x + rect.width <= display.workArea.x + display.workArea.width && rect.y + rect.height <= display.workArea.y + display.workArea.height)
+    report.displays = { count: displays.length, list: displays, dashboardInsideWorkArea: inside(dashboard?.getBounds()), widgetInsideWorkArea: inside(widget?.getBounds()) }
     const settings = ctx.data().settings
     report.settings = { workingDays: settings.workingDays, hardwareMonitor: settings.hardwareMonitor, launchAtStartup: settings.launchAtStartup }
     report.dataVersion = ctx.data().version
@@ -69,9 +78,19 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
       report.crashRecovery = { reloadedAfterCrash: loads >= 1, loadsAfterCrash: loads, stillAlive: !widget.isDestroyed() && !widget.webContents.isCrashed() }
     }
 
-    for (let index = 0; index < 20 && ctx.hardware().status !== 'ok'; index++) await wait(500)
+    if (process.env.FOCUSFLOW_SMOKE_STALL) {
+      // The harness suspends this process from outside; wait for it to be suspended and resumed, then let the timers settle.
+      await wait(Number(process.env.FOCUSFLOW_SMOKE_STALL) * 1000 + 8000)
+      report.stall = { ticks: ctx.stats.ticks, stalls: ctx.stats.stalls, maxGapMs: ctx.stats.maxGapMs, notifications: ctx.stats.notifications }
+    }
+    if (!expectHidden) for (let index = 0; index < 20 && ctx.hardware().status !== 'ok'; index++) await wait(500)
     await wait(3500)
     report.hardware = ctx.hardware()
+    report.hardwareWorkers = workerProcesses().length
+    report.childProcesses = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${process.pid} } | ForEach-Object { $c = [string]$_.CommandLine; [string]$_.ProcessId + ' ' + $_.Name + ' :: ' + $c.Substring(0, [Math]::Min(100, $c.Length)) }`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 }).stdout.split(/\r?\n/).filter(Boolean)
+    report.hardwareRunning = ctx.actions.hardwareRunning()
+    report.stats = { ...ctx.stats }
+    if (process.env.FOCUSFLOW_SMOKE_SOAK) report.soak = await runSoak(Number(process.env.FOCUSFLOW_SMOKE_SOAK), { actions: ctx.actions, stats: ctx.stats, logger: ctx.logger })
     const shots = process.env.FOCUSFLOW_SMOKE_SHOTS
     if (shots) {
       fs.mkdirSync(shots, { recursive: true })

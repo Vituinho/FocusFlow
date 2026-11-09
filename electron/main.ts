@@ -13,7 +13,7 @@ import { SessionSentinel } from './session'
 import { AppData, AppSettings, AppStatus, DEFAULT_SCHEDULES, RuntimeCommand, ScheduleKind, ScheduleSaveResult, Snapshot, StartupStatus, TransitionPayload } from './shared'
 import { JsonStore } from './store'
 import { loadTrayIcon, TrayIconReport } from './trayIcon'
-import { ScheduleEngine, EngineEvent, effectiveView } from '../src/domain/engine'
+import { ScheduleEngine, EngineEvent, effectiveView, STALL_MS } from '../src/domain/engine'
 import { defaultData, migrateData, needsMigrationBackup, parseActivities } from '../src/domain/migration'
 import { applyRuntimeCommand } from '../src/domain/runtime'
 import { runSmoke } from './smoke'
@@ -131,6 +131,7 @@ function snapshot(now = Date.now()): Snapshot {
 function broadcastSnapshot() { send('snapshot:updated', snapshot()) }
 
 function notify(event: EngineEvent) {
+  stats.notifications++
   const warning = event.type === 'warning'
   const payload: TransitionPayload = { name: event.name, nextName: event.nextName, warning, sound: data.settings.sound, speech: data.settings.speech }
   if (data.settings.notifications && Notification.isSupported()) {
@@ -150,9 +151,19 @@ function notify(event: EngineEvent) {
   send('activity:transition', payload)
 }
 
+/** Counters for the soak/smoke checks and for diagnosing timer stalls (sleep/resume, heavy load). */
+const stats = { ticks: 0, maxGapMs: 0, stalls: 0, lastTickAt: 0, notifications: 0 }
+
 function tick(suppress = false) {
   try {
     const now = Date.now()
+    if (stats.lastTickAt) {
+      const gap = now - stats.lastTickAt
+      stats.maxGapMs = Math.max(stats.maxGapMs, gap)
+      if (gap > STALL_MS) { stats.stalls++; logger.info(`Timer stall of ${Math.round(gap / 1000)} s detected (sleep/resume or heavy load); announcements are suppressed for this tick`) }
+    }
+    stats.lastTickAt = now
+    stats.ticks++
     const result = engine.tick({ now, schedules: data.schedules, workingDays: data.settings.workingDays, runtime: data.runtime, warningsEnabled: data.settings.warnings }, suppress)
     let changed = false
     if (result.dayChanged) {
@@ -207,7 +218,10 @@ function loadRenderer(window: BrowserWindow, query?: Record<string, string>) {
   const load = devUrl
     ? window.loadURL(query ? `${devUrl}?${new URLSearchParams(query)}` : devUrl)
     : window.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), query ? { query } : undefined)
-  load.catch(error => logger.warn('Renderer load rejected (recovery will handle it)', error))
+  load.catch(error => {
+    // A window destroyed mid-load (manual reload, quit) rejects its own load: not a failure.
+    if (!window.isDestroyed()) logger.warn('Renderer load rejected (recovery will handle it)', error)
+  })
 }
 
 function watchRenderer(name: 'dashboard' | 'widget', window: BrowserWindow) {
@@ -638,7 +652,13 @@ function boot() {
     void runSmoke(process.env.FOCUSFLOW_SMOKE, {
       app, logger, trayReport: () => trayReport, tray: () => tray, dashboard: () => dashboard, widget: () => widget,
       hardware: () => lastHardware, data: () => data, startupStatus, applyLoginItem: (enabled: boolean) => { data.settings.launchAtStartup = enabled; applyLoginItem() },
-      launchedHidden, quit: () => requestQuit(), userData,
+      launchedHidden, quit: () => requestQuit(), userData, stats,
+      actions: {
+        openDashboard, hideDashboard: () => { dashboard?.hide() }, showWidget, hideWidget, reloadWindows,
+        setSettings: (patch: Partial<AppSettings>) => applySettings({ ...data.settings, ...patch }),
+        command: (command: RuntimeCommand) => { const now = Date.now(); data.runtime = applyRuntimeCommand(data.runtime, command, effectiveView(now, data.schedules, data.settings.workingDays, data.runtime), now); engine.markExternalChange(); persist(); tick(true) },
+        storeWrites: () => store.writes, windowCount: () => liveWindows().length, hardwareRunning: () => !!hardware?.isRunning,
+      },
     })
   }
 }
