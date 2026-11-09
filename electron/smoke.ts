@@ -75,7 +75,9 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
       let loads = 0
       widget.webContents.on('did-finish-load', () => { loads++ })
       widget.webContents.forcefullyCrashRenderer()
-      await wait(5000)
+      // Recovery waits 1 s and then reloads; on a loaded machine the page can take several seconds, so poll instead of a fixed wait.
+      for (let index = 0; index < 40 && loads < 1; index++) await wait(500)
+      await wait(500)
       report.crashRecovery = { reloadedAfterCrash: loads >= 1, loadsAfterCrash: loads, stillAlive: !widget.isDestroyed() && !widget.webContents.isCrashed() }
     }
 

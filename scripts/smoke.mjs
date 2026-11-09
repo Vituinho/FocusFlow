@@ -65,6 +65,7 @@ if (flags.has('--crash')) env.FOCUSFLOW_SMOKE_CRASH = '1'
 if (flags.has('--hidden-all')) env.FOCUSFLOW_SMOKE_EXPECT_HIDDEN = '1'
 if (stallSeconds) env.FOCUSFLOW_SMOKE_STALL = String(stallSeconds)
 if (soakSeconds) env.FOCUSFLOW_SMOKE_SOAK = String(soakSeconds)
+if (flags.has('--double') && !stallSeconds) env.FOCUSFLOW_SMOKE_STALL = '12' // keeps the first instance alive long enough for the second launch (no process is suspended)
 if (process.env.SMOKE_SHOTS) env.FOCUSFLOW_SMOKE_SHOTS = process.env.SMOKE_SHOTS
 delete env.ELECTRON_RUN_AS_NODE
 
@@ -89,7 +90,7 @@ if (stallSeconds) sideTasks.push((async () => {
 
 let doubleInfo = null
 if (flags.has('--double')) sideTasks.push((async () => {
-  await sleep(12_000)
+  await sleep(7000)
   const before = sha(dataFile)
   const second = spawn(command, commandArgs, { env: { ...env, FOCUSFLOW_SMOKE: '' }, stdio: 'ignore' })
   const started = Date.now()
