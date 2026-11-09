@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HardwareMonitor, PerfProvider } from './hardware'
 import { aggregateGpu, cpuPercent, parsePerfSample, sumCpuTimes } from './hardwareParse'
-import { createPerfWorker } from './perfWorker'
+import { buildPerfScript, createPerfWorker, powershellPath } from './perfWorker'
+import { spawn } from 'node:child_process'
 import { formatBytes, formatPercent, validateHardwareSnapshot } from './hardwareTypes'
 
 const gpuName = (adapter: string, engine: number, type: string, pid = 1) => `pid_${pid}_luid_0x00000000_0x0000${adapter}_phys_0_eng_${engine}_engtype_${type}`
@@ -233,5 +234,22 @@ describe('perf worker', () => {
       expect(sample.gpu.percent === null || sample.gpu.percent <= 100).toBe(true)
       expect(sample.volumes && sample.volumes.length).toBeGreaterThan(0)
     } finally { worker.dispose() }
+  }, 30_000)
+})
+
+describe.runIf(process.platform === 'win32')('perf worker orphan protection', () => {
+  const launch = (parentPid: number) => spawn(powershellPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(buildPerfScript(parentPid), 'utf16le').toString('base64')], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] })
+  const exitsWithin = (child: ReturnType<typeof launch>, ms: number) => new Promise<boolean>(resolve => { const timer = setTimeout(() => resolve(false), ms); child.on('exit', () => { clearTimeout(timer); resolve(true) }) })
+
+  it('exits by itself when its parent is gone even though stdin is still open (regression: orphaned worker)', async () => {
+    const dead = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' })
+    await new Promise(resolve => dead.on('exit', resolve))
+    const orphan = launch(dead.pid!)
+    try { expect(await exitsWithin(orphan, 25_000)).toBe(true) } finally { orphan.kill() }
+  }, 40_000)
+
+  it('keeps running while its parent is alive', async () => {
+    const worker = launch(process.pid)
+    try { expect(await exitsWithin(worker, 9000)).toBe(false) } finally { worker.stdin?.end(); worker.kill() }
   }, 30_000)
 })

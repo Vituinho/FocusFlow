@@ -12,6 +12,7 @@ import { Logger, nullLogger } from './logger'
  * Nothing leaves the machine and no network access is involved.
  */
 export const PERF_SCRIPT = String.raw`
+$parentPid = __PARENT_PID__
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -20,10 +21,28 @@ $out.AutoFlush = $true
 $diskPrev = @{}
 $gpuPrev = @{}
 $primed = $false
+$pending = $null
+$stdin = [Console]::OpenStandardInput()
+$buffer = New-Object byte[] 256
+$acc = ''
+$lf = [string][char]10
 while ($true) {
   if ($primed) {
-    $line = [Console]::In.ReadLine()
-    if ($null -eq $line) { break }
+    # Console.In's ReadLineAsync is synchronous, so read the raw stream asynchronously to be able to time out. Normally stdin
+    # closing ends the loop; the parent check also covers a parent that died without closing the pipe (seen once as an orphaned
+    # worker). A pid can stay resolvable while another process holds a handle to the dead parent, hence HasExited.
+    if ($null -eq $pending) { $pending = $stdin.ReadAsync($buffer, 0, $buffer.Length) }
+    while (-not $pending.Wait(5000)) {
+      try { if ([Diagnostics.Process]::GetProcessById($parentPid).HasExited) { exit } } catch { exit }
+    }
+    $count = $pending.Result
+    $pending = $null
+    if ($count -le 0) { break }
+    $acc += [Text.Encoding]::ASCII.GetString($buffer, 0, $count)
+    $newline = $acc.IndexOf($lf)
+    if ($newline -lt 0) { continue }
+    $line = $acc.Substring(0, $newline)
+    $acc = $acc.Substring($newline + 1)
   } else { $line = 'prime' }
   $r = @{}
   try {
@@ -69,6 +88,9 @@ while ($true) {
 }
 `
 
+/** The sampler script bound to the process that owns it. */
+export const buildPerfScript = (parentPid: number = process.pid) => PERF_SCRIPT.replace('__PARENT_PID__', String(parentPid))
+
 export function powershellPath(): string {
   const root = process.env.SystemRoot || process.env.windir
   return root ? path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
@@ -88,7 +110,7 @@ export function createPerfWorker(options: PerfWorkerOptions = {}): PerfProvider 
 
   const ensure = (): ChildProcess => {
     if (child && child.exitCode === null && !child.killed) return child
-    const encoded = Buffer.from(PERF_SCRIPT, 'utf16le').toString('base64')
+    const encoded = Buffer.from(buildPerfScript(), 'utf16le').toString('base64')
     const spawned = spawnFn(powershellPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
       windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
     })
