@@ -13,7 +13,7 @@ describe('controles de foco e notificações', () => {
     expect(paused.frozenRemainingMs).toBe(60_000)
     const resumed = resumeRuntime(paused, monday(9, 50))
     expect(resumed.paused).toBe(false)
-    expect(resumed.manual).toEqual({ name: 'Projetos em andamento', endAt: monday(9, 51) })
+    expect(resumed.manual).toEqual({ name: 'Projetos em andamento', endAt: monday(9, 51), startedAt: monday(9, 50) })
   })
 
   it('não reanuncia um mesmo bloco ao processar o instante mais de uma vez', () => {

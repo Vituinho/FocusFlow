@@ -1,8 +1,13 @@
-import { Activity, ScheduleView } from '../../electron/shared'
+import type { Activity, ScheduleKind, ScheduleSet, ScheduleView } from '../../electron/shared'
 
-export const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5]
+/** Monday to Saturday. Sunday is a rest day unless the user enables it. */
+export const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5, 6]
 const minute = 60_000
 const day = 86_400_000
+const BREAK_IDS = new Set(['almoco', 'cafe'])
+
+/** Breaks are scheduled blocks that do not count as focus time. */
+export const isBreakActivity = (item: Pick<Activity, 'id'>) => BREAK_IDS.has(item.id)
 
 export function parseTime(value: string): number {
   const match = /^(\d{2}):(\d{2})$/.exec(value)
@@ -21,11 +26,16 @@ function atMinute(date: Date, minutes: number): number {
   return value.getTime()
 }
 
+export const MAX_ACTIVITIES = 60
+export const MAX_NAME_LENGTH = 80
+
 export function validateSchedule(schedule: Activity[]): string | null {
   if (schedule.length === 0) return 'Adicione pelo menos uma atividade.'
+  if (schedule.length > MAX_ACTIVITIES) return `Use no máximo ${MAX_ACTIVITIES} atividades.`
   const ids = new Set<string>()
   for (const item of schedule) {
     if (!item.name.trim()) return 'Toda atividade precisa de um nome.'
+    if (item.name.length > MAX_NAME_LENGTH) return `O nome de “${item.name.slice(0, 20)}…” é longo demais (máximo ${MAX_NAME_LENGTH} caracteres).`
     if (!item.id || ids.has(item.id)) return 'Cada atividade precisa de um identificador único.'
     ids.add(item.id)
     const start = parseTime(item.start), end = parseTime(item.end)
@@ -40,6 +50,15 @@ export function validateSchedule(schedule: Activity[]): string | null {
   return null
 }
 
+/** Saturday has its own agenda; every other enabled day (Monday-Friday, and Sunday if the user enabled it) uses the weekday agenda. */
+export const scheduleKindForDay = (dayOfWeek: number): ScheduleKind => dayOfWeek === 6 ? 'saturday' : 'weekday'
+
+export function scheduleForDate(set: ScheduleSet, date: Date): Activity[] {
+  return set[scheduleKindForDay(date.getDay())]
+}
+
+const isSet = (value: Activity[] | ScheduleSet): value is ScheduleSet => !Array.isArray(value)
+
 function getWorkDate(date: Date, workingDays: number[]): Date | null {
   const workDate = new Date(date)
   if (!workingDays.includes(workDate.getDay())) return null
@@ -47,50 +66,57 @@ function getWorkDate(date: Date, workingDays: number[]): Date | null {
   return workDate
 }
 
-function nextWorkday(date: Date, workingDays: number[]): Date {
-  const result = new Date(date)
-  result.setHours(0, 0, 0, 0)
-  for (let count = 0; count < 8; count++) {
-    result.setDate(result.getDate() + 1)
-    if (workingDays.includes(result.getDay())) return result
-  }
-  return result
+function sortedBlocks(schedule: Activity[]): Activity[] {
+  return [...schedule].sort((a, b) => parseTime(a.start) - parseTime(b.start))
 }
 
-export function getScheduleView(now: number, schedule: Activity[], workingDays = DEFAULT_WORKING_DAYS): ScheduleView {
+/** Start (timestamp) of the first block on the next enabled day after `date`, or null when no day is enabled. */
+export function nextWorkdayStart(date: Date, schedules: Activity[] | ScheduleSet, workingDays: number[]): number | null {
+  const cursor = new Date(date)
+  cursor.setHours(0, 0, 0, 0)
+  for (let count = 0; count < 8; count++) {
+    cursor.setDate(cursor.getDate() + 1)
+    if (!workingDays.includes(cursor.getDay())) continue
+    const blocks = sortedBlocks(isSet(schedules) ? scheduleForDate(schedules, cursor) : schedules)
+    if (blocks.length) return atMinute(cursor, parseTime(blocks[0].start))
+  }
+  return null
+}
+
+export function totalFocusMs(schedule: Activity[]): number {
+  return schedule.filter(item => !isBreakActivity(item)).reduce((sum, item) => sum + (parseTime(item.end) - parseTime(item.start)) * minute, 0)
+}
+
+/**
+ * Resolves what is happening at `now`. Accepts either a single agenda (applied to every enabled day) or the
+ * per-day-kind set, in which case Saturday uses its own agenda.
+ */
+export function getScheduleView(now: number, schedules: Activity[] | ScheduleSet, workingDays = DEFAULT_WORKING_DAYS): ScheduleView {
   const date = new Date(now)
   const today = getWorkDate(date, workingDays)
-  const totalFocusMs = schedule.filter(item => !['almoco', 'cafe'].includes(item.id)).reduce((sum, item) => sum + (parseTime(item.end) - parseTime(item.start)) * minute, 0)
-  if (!today) {
-    return { kind: 'rest', activity: null, next: null, startAt: null, endAt: null, nextAt: null, totalFocusMs, dayStart: null, dayEnd: null }
-  }
-  const blocks = [...schedule].sort((a, b) => parseTime(a.start) - parseTime(b.start))
+  const scheduleKind = scheduleKindForDay(date.getDay())
+  const schedule = isSet(schedules) ? schedules[scheduleKind] : schedules
+  const total = totalFocusMs(schedule)
+  const empty = { activity: null, next: null, startAt: null, endAt: null, nextAt: null, totalFocusMs: total, dayStart: null, dayEnd: null, scheduleKind }
+  if (!today) return { kind: 'rest', ...empty, nextAt: nextWorkdayStart(date, schedules, workingDays) }
+  const blocks = sortedBlocks(schedule)
   const first = blocks[0]
   const last = blocks[blocks.length - 1]
-  if (!first || !last) return { kind: 'finished', activity: null, next: null, startAt: null, endAt: null, nextAt: null, totalFocusMs, dayStart: null, dayEnd: null }
+  if (!first || !last) return { kind: 'finished', ...empty, nextAt: nextWorkdayStart(date, schedules, workingDays) }
   const dayStart = atMinute(today, parseTime(first.start)), dayEnd = atMinute(today, parseTime(last.end))
-  if (now < dayStart) {
-    const nextDay = nextWorkday(today, workingDays)
-    const nextAt = atMinute(today, parseTime(first.start))
-    return { kind: 'before', activity: null, next: first, startAt: null, endAt: null, nextAt: now < nextAt ? nextAt : atMinute(nextDay, parseTime(first.start)), totalFocusMs, dayStart, dayEnd }
-  }
+  const bounds = { ...empty, dayStart, dayEnd }
+  if (now < dayStart) return { kind: 'before', ...bounds, next: first, nextAt: dayStart }
   for (let index = 0; index < blocks.length; index++) {
     const current = blocks[index]
     const startAt = atMinute(today, parseTime(current.start)), endAt = atMinute(today, parseTime(current.end))
-    if (now >= startAt && now < endAt) {
-      const next = blocks[index + 1] ?? null
-      return { kind: 'activity', activity: current, next, startAt, endAt, nextAt: endAt, totalFocusMs, dayStart, dayEnd }
-    }
+    if (now >= startAt && now < endAt) return { kind: 'activity', ...bounds, activity: current, next: blocks[index + 1] ?? null, startAt, endAt, nextAt: endAt }
     const next = blocks[index + 1]
-    if (now < startAt && index > 0) {
-      return { kind: 'before', activity: null, next: current, startAt: null, endAt: null, nextAt: startAt, totalFocusMs, dayStart, dayEnd }
-    }
     if (now >= endAt && next && now < atMinute(today, parseTime(next.start))) {
-      return { kind: 'before', activity: null, next, startAt: null, endAt: null, nextAt: atMinute(today, parseTime(next.start)), totalFocusMs, dayStart, dayEnd }
+      return { kind: 'before', ...bounds, next, nextAt: atMinute(today, parseTime(next.start)) }
     }
   }
-  if (now >= dayEnd) return { kind: 'finished', activity: null, next: null, startAt: null, endAt: null, nextAt: null, totalFocusMs, dayStart, dayEnd }
-  return { kind: 'before', activity: null, next: first, startAt: null, endAt: null, nextAt: dayStart, totalFocusMs, dayStart, dayEnd }
+  if (now >= dayEnd) return { kind: 'finished', ...bounds, nextAt: nextWorkdayStart(date, schedules, workingDays) }
+  return { kind: 'before', ...bounds, next: first, nextAt: dayStart }
 }
 
 export function remainingMs(endAt: number | null, now: number): number {
@@ -100,6 +126,22 @@ export function remainingMs(endAt: number | null, now: number): number {
 export function progressPercent(startAt: number | null, endAt: number | null, now: number): number {
   if (startAt === null || endAt === null || endAt <= startAt) return 0
   return Math.min(100, Math.max(0, ((now - startAt) / (endAt - startAt)) * 100))
+}
+
+export type DayTotals = { elapsedMs: number; totalMs: number; percent: number; completed: number; count: number }
+
+/** Focus time done so far today (breaks excluded) for the agenda that applies to `now`'s date. */
+export function getDayTotals(schedule: Activity[], now: number): DayTotals {
+  const date = new Date(now)
+  let elapsedMs = 0, totalMs = 0, completed = 0
+  for (const item of schedule) {
+    const start = atMinute(date, parseTime(item.start)), end = atMinute(date, parseTime(item.end))
+    if (isBreakActivity(item) || !(end > start)) continue
+    totalMs += end - start
+    elapsedMs += Math.max(0, Math.min(now, end) - start)
+    if (now >= end) completed++
+  }
+  return { elapsedMs, totalMs, percent: totalMs ? Math.min(100, (elapsedMs / totalMs) * 100) : 0, completed, count: schedule.filter(item => !isBreakActivity(item)).length }
 }
 
 export function getDayBounds(now: number): { start: number; end: number } {

@@ -20,7 +20,7 @@ describe('agenda FocusFlow', () => {
   })
 
   it('mostra descanso nos fins de semana e encerramento após o último bloco', () => {
-    expect(getScheduleView(localDate(24, 10), DEFAULT_SCHEDULE).kind).toBe('rest')
+    expect(getScheduleView(localDate(25, 10), DEFAULT_SCHEDULE).kind).toBe('rest')
     expect(getScheduleView(localDate(26, 18), DEFAULT_SCHEDULE).kind).toBe('finished')
   })
 

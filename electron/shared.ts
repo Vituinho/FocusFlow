@@ -18,6 +18,10 @@ export type AppSettings = {
   launchAtStartup: boolean
   workingDays: number[]
   compactWidget: boolean
+  /** Live CPU/RAM/GPU/disk indicators. Disabling stops the sampler entirely. */
+  hardwareMonitor: boolean
+  /** Allows bounded automatic recovery (renderer reloads and one limited relaunch after a fatal main-process error). */
+  crashRecovery: boolean
 }
 
 export type RuntimeState = {
@@ -26,15 +30,21 @@ export type RuntimeState = {
   frozenRemainingMs?: number
   pausedActivityName?: string
   focusMode: boolean
-  manual?: { name: string; endAt: number }
+  manual?: { name: string; endAt: number; startedAt?: number }
   extendedUntil?: number
   skippedKeys: string[]
 }
 
 export type AppData = { schedule: Activity[]; settings: AppSettings; runtime: RuntimeState; widgetBounds?: { x: number; y: number; width: number; height: number } }
 
+export type ScheduleKind = 'weekday' | 'saturday'
+
+/** One editable agenda per kind of working day. Sunday has none: it is a rest day unless enabled by the user (then it uses the weekday agenda). */
+export type ScheduleSet = { weekday: Activity[]; saturday: Activity[] }
+
 export type ScheduleView = {
   kind: 'activity' | 'before' | 'finished' | 'rest'
+  scheduleKind?: ScheduleKind
   activity: Activity | null
   next: Activity | null
   startAt: number | null
@@ -73,10 +83,20 @@ export const DEFAULT_SCHEDULE: Activity[] = [
   { id: 'encerramento', name: 'Encerramento do dia', start: '17:55', end: '18:00', color: '#f6ad70', icon: 'sunset' },
 ]
 
+/** Saturday: the weekday morning structure, ending exactly at 12:00, with no lunch or afternoon blocks. */
+export const SATURDAY_SCHEDULE: Activity[] = [
+  { id: 'sab-planejamento', name: 'Planejamento diário', start: '08:00', end: '08:15', color: '#a78bfa', icon: 'calendar' },
+  { id: 'sab-projetos-1', name: 'Projetos em andamento', start: '08:15', end: '09:45', color: '#58d5bd', icon: 'layers' },
+  { id: 'sab-dsa', name: 'LeetCode / DSA', start: '09:45', end: '10:25', color: '#7da8ff', icon: 'code' },
+  { id: 'sab-projetos-2', name: 'Projetos em andamento', start: '10:25', end: '12:00', color: '#58d5bd', icon: 'layers' },
+]
+
+export const DEFAULT_SCHEDULES: ScheduleSet = { weekday: DEFAULT_SCHEDULE, saturday: SATURDAY_SCHEDULE }
+
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark', notifications: true, sound: true, speech: false, warnings: false,
   alwaysOnTop: true, transparency: false, launchAtStartup: false,
-  workingDays: [1, 2, 3, 4, 5], compactWidget: false,
+  workingDays: [1, 2, 3, 4, 5, 6], compactWidget: false, hardwareMonitor: true, crashRecovery: true,
 }
 
 export const DEFAULT_RUNTIME: RuntimeState = { paused: false, focusMode: false, skippedKeys: [] }
