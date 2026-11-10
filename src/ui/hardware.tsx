@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Cpu, HardDrive, MemoryStick, MonitorCog, RefreshCw } from 'lucide-react'
+import { barStyle } from './bar'
 import { EMPTY_HARDWARE, formatBytes, formatPercent, freshHardware, HardwareSnapshot, validateHardwareSnapshot } from '../../electron/hardwareTypes'
 
 /** Latest validated hardware snapshot. Values older than 20 s are downgraded to N/D instead of being shown as if live. */
@@ -19,7 +20,7 @@ const level = (value: number | null) => value === null ? 'na' : value >= 90 ? 'h
 function Meter({ icon: Icon, label, value, detail }: { icon: typeof Cpu; label: string; value: number | null; detail: string }) {
   return <div className={`hw-card hw-${level(value)}`} title={`${label}: ${formatPercent(value)}`}>
     <div className="hw-card-head"><span className="hw-icon"><Icon size={15} /></span><span className="hw-label">{label}</span><strong className="hw-value">{formatPercent(value)}</strong></div>
-    <div className="hw-bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value ?? undefined} aria-valuetext={formatPercent(value)}><span style={{ width: `${value ?? 0}%` }} /></div>
+    <div className="hw-bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value ?? undefined} aria-valuetext={formatPercent(value)}><span style={barStyle(value ?? 0)} /></div>
     <small className="hw-detail">{detail}</small>
   </div>
 }
@@ -53,7 +54,7 @@ export function HardwarePanel({ snapshot, enabled, onRetry, onEnable }: { snapsh
         return <li key={volume.id} className={volume.totalBytes === null ? 'is-missing' : ''}>
           <strong>{volume.id}</strong>
           <span className="hw-volume-label">{volume.label || 'Disco local'}</span>
-          <div className="hw-bar thin"><span style={{ width: `${percent ?? 0}%` }} /></div>
+          <div className="hw-bar thin"><span style={barStyle(percent ?? 0)} /></div>
           <small>{volume.totalBytes === null ? 'N/D (desconectado ou ilegível)' : `${formatBytes(volume.usedBytes)} de ${formatBytes(volume.totalBytes)} (${percent}%)`}</small>
         </li>
       })}</ul>}
