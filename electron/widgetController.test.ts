@@ -140,27 +140,50 @@ describe('WidgetController.reveal', () => {
     expect(state.created).toHaveLength(1)
   })
 
-  it('waits for a page that is still loading, and does not recreate it when it finishes', async () => {
+  it('shows a widget immediately while its page is still loading (a slow machine must not delay or recreate it)', async () => {
     const { controller, state } = setup()
     const window = state.window!
     window.loading = true
-    const pending = controller.reveal('test')
-    await Promise.resolve()
-    expect(window.isVisible()).toBe(false) // not shown before it can render
-    window.finishLoad()
-    expect((await pending).ok).toBe(true)
+    const result = await controller.reveal('test')
+    expect(result.ok).toBe(true)
+    expect(window.isVisible()).toBe(true)
+    expect(state.created).toHaveLength(0)
+    expect(window.destroyed).toBe(false)
+  })
+
+  it('supervises a page that stays loading: one reload, then a user-facing message, never a recreate loop', async () => {
+    const { controller, state, timers, logger } = setup({ loadTimeoutMs: 30_000 })
+    const window = state.window!
+    window.loading = true
+    await controller.reveal('test')
+    timers.find(timer => timer.ms === 30_000)!.callback()
+    expect(window.calls).toContain('reload')
+    expect(state.failures).toHaveLength(0)
+    timers.filter(timer => timer.ms === 30_000).forEach(timer => timer.callback())
+    expect(state.failures).toHaveLength(1)
+    expect(logger.error).toHaveBeenCalled()
+    expect(window.destroyed).toBe(false)
     expect(state.created).toHaveLength(0)
   })
 
-  it('replaces a window whose page never finishes loading', async () => {
+  it('stops supervising once the page finishes loading', async () => {
     const { controller, state, timers } = setup()
-    const stuck = state.window!
-    stuck.loading = true
-    const pending = controller.reveal('test')
-    await Promise.resolve()
-    timers.find(timer => timer.ms === 10_000)!.callback() // load timeout fires
-    expect((await pending).ok).toBe(true)
-    expect(stuck.destroyed).toBe(true)
+    const window = state.window!
+    window.loading = true
+    await controller.reveal('test')
+    window.finishLoad()
+    expect(timers.filter(timer => timer.ms === 30_000)).toHaveLength(0)
+    expect(window.calls).not.toContain('reload')
+  })
+
+  it('replaces a window whose renderer crashes while it is being shown', async () => {
+    const { controller, state } = setup()
+    const first = state.window!
+    const originalShow = first.showInactive.bind(first)
+    first.showInactive = () => { originalShow(); first.crashed = true }
+    const result = await controller.reveal('test')
+    expect(result.ok).toBe(true)
+    expect(first.destroyed).toBe(true)
     expect(state.created).toHaveLength(1)
   })
 

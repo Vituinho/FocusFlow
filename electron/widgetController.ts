@@ -80,6 +80,7 @@ function describe(window: WidgetWindow | null): string {
 export class WidgetController {
   private inflight: Promise<RevealResult> | null = null
   private pulseTimer: unknown
+  private readonly watched = new WeakSet<object>()
   private requests = 0
   private readonly sleep: (ms: number) => Promise<void>
   private readonly setTimer: (callback: () => void, ms: number) => unknown
@@ -139,8 +140,10 @@ export class WidgetController {
         steps.push('created window'); recreated = true
       }
       try {
-        const ready = await this.waitUntilUsable(window, steps)
-        if (!ready) { steps.push(`attempt ${attempt}: renderer never became usable`); continue }
+        // A crashed renderer cannot be shown usefully: replace the window on the next attempt. A page that is merely slow to load (busy
+        // machine, antivirus scan) is NOT replaced - restarting a slow load only makes it slower. The window is shown at once (its
+        // background already matches the widget) and the load is supervised in the background.
+        if (window.webContents.isCrashed()) { steps.push(`attempt ${attempt}: renderer crashed`); continue }
         this.restore(window, steps)
         window.setBounds(this.targetBounds(safeBounds(window)))
         steps.push('bounds fitted')
@@ -150,6 +153,7 @@ export class WidgetController {
         const problem = this.verify(window)
         if (!problem) {
           if (options.remember !== false) this.deps.persistVisible(true)
+          this.watchLoad(window)
           logger.info(`Widget: shown OK (${reason}) after ${steps.join(' > ') || 'no repairs needed'}; ${describe(window)}`)
           return { ok: true, recreated, steps }
         }
@@ -159,19 +163,32 @@ export class WidgetController {
     return this.fail(reason, steps[steps.length - 1] ?? 'unknown', steps, recreated)
   }
 
-  /** Waits for a loaded, uncrashed renderer. A crashed or stuck page is replaced by the caller on the next attempt. */
-  private async waitUntilUsable(window: WidgetWindow, steps: string[]): Promise<boolean> {
-    if (window.webContents.isCrashed()) { steps.push('renderer crashed'); return false }
-    if (!window.webContents.isLoading()) return true
-    steps.push('waiting for the page to load')
-    const timeout = this.deps.loadTimeoutMs ?? 10_000
-    return new Promise<boolean>(resolve => {
-      let settled = false
-      const done = (value: boolean) => { if (settled) return; settled = true; this.clearTimer(timer); window.webContents.removeListener('did-finish-load', onLoad); resolve(value) }
-      const onLoad = () => done(true)
-      const timer = this.setTimer(() => done(false), timeout)
+  /**
+   * If the page is still loading after the (generous) timeout, reload it once; if it still has not loaded after another timeout, tell
+   * the user. The window is never destroyed here, so a slow machine cannot cause a recreate loop.
+   */
+  private watchLoad(window: WidgetWindow) {
+    if (this.watched.has(window) || !window.webContents.isLoading()) return
+    this.watched.add(window)
+    const timeout = this.deps.loadTimeoutMs ?? 30_000
+    const waitForLoad = (then: () => void) => {
+      let handle: unknown
+      const onLoad = () => { this.clearTimer(handle); this.watched.delete(window) }
+      handle = this.setTimer(() => {
+        window.webContents.removeListener('did-finish-load', onLoad)
+        if (window.isDestroyed() || !window.webContents.isLoading()) { this.watched.delete(window); return }
+        then()
+      }, timeout)
       window.webContents.once('did-finish-load', onLoad)
-      if (!window.webContents.isLoading()) done(true)
+    }
+    waitForLoad(() => {
+      this.deps.logger.warn(`Widget: page still loading after ${Math.round(timeout / 1000)} s; reloading it once`)
+      try { window.webContents.reload() } catch (error) { this.deps.logger.error('Widget: reload failed', error) }
+      waitForLoad(() => {
+        this.watched.delete(window)
+        this.deps.logger.error('Widget: page did not load even after a reload')
+        this.deps.notifyFailure('O widget está demorando muito para carregar. Use “Recarregar janelas” no menu da bandeja ou veja os logs.')
+      })
     })
   }
 
@@ -204,6 +221,7 @@ export class WidgetController {
   private verify(window: WidgetWindow): string | null {
     if (window.isDestroyed()) return 'window was destroyed'
     if (!window.isVisible()) return 'window is not visible after show'
+    if (window.webContents.isCrashed()) return 'renderer crashed while showing'
     if (window.isMinimized()) return 'window is still minimized'
     if (window.getOpacity() < MIN_OPACITY) return 'window is transparent'
     const bounds = window.getBounds()
