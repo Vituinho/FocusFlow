@@ -669,7 +669,8 @@ function boot() {
   createDashboard()
   createWidget()
   createTray()
-  if (data.widgetVisible) void showWidget('startup', false)
+  // An interactive launch must show the widget even over a maximized app; the quiet start with Windows (--hidden) must not grab attention.
+  if (data.widgetVisible) void showWidget(launchedHidden ? 'startup-login' : 'startup', !launchedHidden)
   logger.info(`Startup: windows and tray created after ${Date.now() - bootStarted} ms`)
   // Local-only minidumps (nothing is uploaded). Started after the windows are up so it can never delay startup.
   setTimeout(() => { try { crashReporter.start({ uploadToServer: false, compress: true }) } catch (error) { logger.warn('Local crash dumps unavailable', error) } }, 5000).unref()
