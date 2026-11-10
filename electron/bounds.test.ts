@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fitBoundsToDisplays, isRect, minimumSizeFor } from './bounds'
+import { fitBoundsToDisplays, isRect, isUsableBounds, minimumSizeFor, refitIfNeeded } from './bounds'
 
 const primary = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1040 } }
 const right = { id: 2, workArea: { x: 1920, y: 0, width: 1280, height: 984 } }
@@ -52,5 +52,32 @@ describe('minimumSizeFor (regression: dashboard larger than the work area at 200
     expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 1920, height: 1040 })).toEqual({ width: 880, height: 650 })
     expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 800, height: 426 })).toEqual({ width: 800, height: 426 })
     expect(minimumSizeFor({ width: 880, height: 650 }, { x: 0, y: 0, width: 534.7, height: 284.2 })).toEqual({ width: 534, height: 284 })
+  })
+})
+
+describe('refitIfNeeded (never move a window the user can reach)', () => {
+  const min = { width: 880, height: 650 }
+  it('leaves a usable window untouched on any monitor, including negative coordinates and partly off-screen', () => {
+    for (const rect of [{ x: 342, y: 106, width: 1220, height: 820 }, { x: -1298, y: 104, width: 1220, height: 820 }, { x: 1500, y: 100, width: 1220, height: 820 }]) {
+      expect(refitIfNeeded(rect, [primary, left], primary, min)).toEqual({ rect, changed: false })
+    }
+  })
+  it('moves a window whose monitor was unplugged, or whose title bar is unreachable', () => {
+    const gone = refitIfNeeded({ x: -1298, y: 104, width: 1220, height: 820 }, [primary], primary, min)
+    expect(gone.changed).toBe(true)
+    expect(gone.rect.x).toBeGreaterThanOrEqual(0)
+    expect(refitIfNeeded({ x: 300, y: 5000, width: 1220, height: 820 }, [primary], primary, min).changed).toBe(true)
+  })
+  it('shrinks a window that no longer fits after a DPI change', () => {
+    const small = { id: 1, workArea: { x: 0, y: 0, width: 960, height: 516 } }
+    const result = refitIfNeeded({ x: 0, y: 0, width: 1220, height: 820 }, [small], small, { width: 880, height: 650 })
+    expect(result.changed).toBe(true)
+    expect(result.rect.width).toBeLessThanOrEqual(960)
+    expect(result.rect.height).toBeLessThanOrEqual(516)
+  })
+  it('classifies usable bounds', () => {
+    expect(isUsableBounds({ x: 100, y: 100, width: 800, height: 600 }, [primary])).toBe(true)
+    expect(isUsableBounds({ x: 9000, y: 100, width: 800, height: 600 }, [primary])).toBe(false)
+    expect(isUsableBounds(undefined, [primary])).toBe(false)
   })
 })

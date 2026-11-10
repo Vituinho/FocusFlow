@@ -49,3 +49,24 @@ export function fitBoundsToDisplays(saved: Rect | undefined, displays: DisplayIn
 export function minimumSizeFor(minimum: { width: number; height: number }, workArea: Rect): { width: number; height: number } {
   return { width: Math.max(1, Math.min(minimum.width, Math.floor(workArea.width))), height: Math.max(1, Math.min(minimum.height, Math.floor(workArea.height))) }
 }
+
+/**
+ * Is the window where a user can reach it? True when a meaningful part of it is on some work area and its top edge (title/drag area) is
+ * inside that work area. Windows the user deliberately parked partly off-screen are therefore left alone.
+ */
+export function isUsableBounds(bounds: Rect | undefined, displays: DisplayInfo[]): boolean {
+  if (!isRect(bounds)) return false
+  return displays.some(display => {
+    const area = display.workArea
+    return overlapArea(bounds, area) >= Math.min(bounds.width * bounds.height * 0.25, 200 * 100) && bounds.y >= area.y - 8 && bounds.y <= area.y + area.height - 40
+  })
+}
+
+/** After a display change: leave a usable window exactly where it is; only an unreachable or oversized one is moved. */
+export function refitIfNeeded(current: Rect, displays: DisplayInfo[], primary: DisplayInfo, minimum: { width: number; height: number }): { rect: Rect; changed: boolean } {
+  const workArea = (displays.find(display => overlapArea(current, display.workArea) > 0) ?? primary).workArea
+  const oversized = current.width > workArea.width + 2 || current.height > workArea.height + 2
+  if (isUsableBounds(current, displays) && !oversized) return { rect: current, changed: false }
+  const rect = fitBoundsToDisplays(current, displays, primary, { width: current.width, height: current.height }, minimum)
+  return { rect, changed: rect.x !== current.x || rect.y !== current.y || rect.width !== current.width || rect.height !== current.height }
+}

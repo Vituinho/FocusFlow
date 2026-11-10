@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fitBoundsToDisplays, isRect, minimumSizeFor, Rect } from './bounds'
+import { fitBoundsToDisplays, isRect, minimumSizeFor, refitIfNeeded, Rect } from './bounds'
 import { HardwareMonitor } from './hardware'
 import { sumCpuTimes } from './hardwareParse'
 import { EMPTY_HARDWARE, HardwareSnapshot, validateHardwareSnapshot } from './hardwareTypes'
@@ -286,7 +286,13 @@ function saveDashboardBounds() {
   const normal = dashboard.getNormalBounds()
   data.dashboardBounds = { ...normal, ...(maximized ? { maximized: true } : {}) }
   store.schedule(() => data)
+  if (boundsLogTimer) clearTimeout(boundsLogTimer)
+  boundsLogTimer = setTimeout(() => {
+    if (dashboard && !dashboard.isDestroyed()) logger.info(`Dashboard position saved: ${normal.x},${normal.y} ${normal.width}x${normal.height}${maximized ? ' (maximized)' : ''} on display #${screen.getDisplayMatching(normal).id}`)
+  }, 1500)
+  boundsLogTimer.unref?.()
 }
+let boundsLogTimer: NodeJS.Timeout | undefined
 
 function createDashboard() {
   const rect = dashboardRect()
@@ -336,6 +342,7 @@ function openDashboard() {
   if (!dashboard || dashboard.isDestroyed()) { recoveriesShouldShow = true; createDashboard() }
   const window = dashboard!
   if (window.isMinimized()) window.restore()
+  keepDashboardReachable('open')
   window.show()
   window.focus()
 }
@@ -364,17 +371,24 @@ function reloadWindows() {
   healWidget('reload-windows')
 }
 
+/** Moves the dashboard only when it is unreachable or too big for its display; a window the user can reach is never repositioned. */
+function keepDashboardReachable(reason: string) {
+  if (!dashboard || dashboard.isDestroyed() || dashboard.isMaximized() || dashboard.isMinimized()) return
+  const current = dashboard.getBounds()
+  const minimum = dashboardMinimum(current)
+  dashboard.setMinimumSize(minimum.width, minimum.height)
+  const { rect, changed } = refitIfNeeded(current, displays(), primaryDisplay(), DASHBOARD_MINIMUM)
+  if (!changed) return
+  logger.info(`Dashboard was not reachable (${reason}): moving from ${current.x},${current.y} ${current.width}x${current.height} to ${rect.x},${rect.y} ${rect.width}x${rect.height}`)
+  dashboard.setBounds(rect)
+}
+
 function refitWindows() {
   if (displayTimer) clearTimeout(displayTimer)
   displayTimer = setTimeout(() => {
     try {
       healWidget('display-change')
-      if (dashboard && !dashboard.isDestroyed() && !dashboard.isMaximized() && !dashboard.isMinimized()) {
-        const rect = dashboardRect()
-        const minimum = dashboardMinimum(rect)
-        dashboard.setMinimumSize(minimum.width, minimum.height)
-        dashboard.setBounds(rect)
-      }
+      keepDashboardReachable('display-change')
       refreshTrayIcon()
     } catch (error) { logger.warn('Could not re-fit windows after a display change', error) }
   }, 400)
