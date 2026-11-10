@@ -96,7 +96,9 @@ export async function runWidgetScenario(actions: WidgetScenarioActions, shotsDir
   const { dashboard } = actions.windows()
   record('dashboard and widget are both visible', !!dashboard?.isVisible() && !!live()?.isVisible())
 
-  // The user's real situation: always-on-top off and another window sitting on the widget.
+  // The user's real situation: always-on-top off and another window sitting on the widget. Wait out the temporary top-most pulse of the
+  // previous reveal first, otherwise the widget is legitimately still floating above the cover (a race in this check, not in the app).
+  await wait(3200)
   const widgetBefore = live()!
   const cover = coverFor(widgetBefore)
   await wait(900)
