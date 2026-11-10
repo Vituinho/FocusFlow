@@ -428,7 +428,8 @@ function buildTrayMenu() {
 }
 
 function trayTooltip(): string {
-  const parts = ['FocusFlow', trayStatusLabel()]
+  // UI automation tests run beside the user's real FocusFlow; an isolated run can tag its tooltip so the test only ever touches its own tray icon.
+  const parts = ['FocusFlow', ...(process.env.FOCUSFLOW_USER_DATA && process.env.FOCUSFLOW_TRAY_TAG ? [`[${process.env.FOCUSFLOW_TRAY_TAG}]`] : []), trayStatusLabel()]
   if (data.settings.hardwareMonitor && lastHardware.status === 'ok' && lastHardware.cpu !== null) parts.push(`CPU ${Math.round(lastHardware.cpu)}%`)
   return parts.join(' · ').slice(0, 120)
 }
