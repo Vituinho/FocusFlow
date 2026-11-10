@@ -31,7 +31,8 @@ export function findOlderInstances(processes: ProcessInfo[], own: OwnIdentity): 
 
 /** Lists running FocusFlow*.exe main processes with their file versions (one short PowerShell call). */
 export function listFocusFlowProcesses(): Promise<ProcessInfo[]> {
-  const script = `Get-CimInstance Win32_Process -Filter "Name LIKE 'FocusFlow%'" | ForEach-Object { $v = ''; try { $v = (Get-Item -LiteralPath $_.ExecutablePath).VersionInfo.ProductVersion } catch {}; [string]$_.ProcessId + '|' + $v + '|' + $_.ExecutablePath + '|' + $_.CommandLine }`
+  // Only processes of the current Windows session: another user's copy (fast user switching, RDP) is none of our business.
+  const script = `$sid = (Get-Process -Id $PID).SessionId; Get-CimInstance Win32_Process -Filter "Name LIKE 'FocusFlow%'" | Where-Object { $_.SessionId -eq $sid } | ForEach-Object { $v = ''; try { $v = (Get-Item -LiteralPath $_.ExecutablePath).VersionInfo.ProductVersion } catch {}; [string]$_.ProcessId + '|' + $v + '|' + $_.ExecutablePath + '|' + $_.CommandLine }`
   return new Promise(resolve => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true, timeout: 15_000 }, (error, stdout) => {
       if (error) { resolve([]); return }

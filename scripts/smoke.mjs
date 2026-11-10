@@ -16,6 +16,7 @@
 //   --soak=SECONDS    bounded stress loop (hide/show, settings, hardware toggles, worker kills) with CPU/RAM/timer sampling
 //   --widget          widget end-to-end in the real app: covered/hidden/destroyed/crashed/off-screen/minimized, verified on the real screen
 //   --double          launch a second instance against the same data and prove it exits without touching focusflow.json
+//   --takeover        a newer build finds an older one holding the lock, is told yes, closes it and takes over (needs a uniquely named exe)
 //   --real-userdata   do not override the data folder (use only for name-isolated test installs)
 // Environment: SMOKE_SEED_V1=<json file> seeds focusflow.json, SMOKE_SHOTS=<dir> writes screenshots, SMOKE_KEEP=1 keeps the temp folder,
 // SMOKE_REPORT=<file> copies the JSON report there.
@@ -76,6 +77,28 @@ const checks = []
 const check = (name, ok) => checks.push([name, !!ok])
 
 const SUSPEND = `Add-Type -Namespace N -Name P -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);'; $p = [Diagnostics.Process]::GetProcessById(PID); [N.P]::NtSuspendProcess($p.Handle) | Out-Null; Start-Sleep -Seconds SECS; [N.P]::NtResumeProcess($p.Handle) | Out-Null`
+
+if (flags.has('--takeover')) {
+  // SAFETY: the takeover path may close any older FocusFlow with the same exe name in this Windows session. Refuse a stock FocusFlow.exe
+  // so this check can never touch a real installation; use a renamed copy (for example the isolated test build FocusFlowTest.exe).
+  if (/[\\/]FocusFlow\.exe$/i.test(command)) { console.error('Refusing --takeover with a stock FocusFlow.exe: use a uniquely named executable'); process.exit(3) }
+  const reportB = join(work, 'reportB.json')
+  const holder = spawn(command, commandArgs, { env: { ...env, FOCUSFLOW_SMOKE_STALL: '90' }, stdio: 'ignore' })
+  await sleep(10_000)
+  const challenger = spawn(command, commandArgs, { env: { ...env, FOCUSFLOW_SMOKE: reportB, FOCUSFLOW_SMOKE_OWN_VERSION: '9.9.9', FOCUSFLOW_SMOKE_TAKEOVER: 'accept' }, stdio: 'ignore' })
+  const started = Date.now()
+  while (!existsSync(reportB) && Date.now() - started < 120_000) await sleep(1000)
+  const holderGone = holder.exitCode !== null || (await Promise.race([new Promise(done => holder.on('exit', () => done(true))), sleep(10_000).then(() => false)]))
+  const reportOk = existsSync(reportB)
+  const taken = reportOk ? JSON.parse(readFileSync(reportB, 'utf8')) : null
+  console.log(JSON.stringify({ holderGone, reportOk, windows: taken?.windows ? { dashboard: !!taken.windows.dashboard, widget: !!taken.windows.widget } : null }))
+  await sleep(2000)
+  try { holder.kill(); challenger.kill() } catch { /* already gone */ }
+  console.log(`${holderGone ? 'PASS' : 'FAIL'}  older instance was closed`)
+  console.log(`${reportOk && !taken.error ? 'PASS' : 'FAIL'}  newer instance took over and ran (relaunched with its own report)`)
+  try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ }
+  process.exit(holderGone && reportOk && !taken.error ? 0 : 1)
+}
 
 console.log(`Launching ${command} ${commandArgs.join(' ')}`)
 const child = spawn(command, commandArgs, { env, stdio: 'ignore', windowsHide: false })

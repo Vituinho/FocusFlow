@@ -713,7 +713,8 @@ async function handleLostLock() {
   log.info(`Second launch of ${app.getVersion()} (pid ${process.pid}): another instance holds the lock`)
   try {
     const outcome = await offerTakeover({
-      own: { pid: process.pid, exeName: path.basename(process.execPath), version: app.getVersion() },
+      // Automated checks may pose as a newer build so the takeover path can be exercised without a second installed version.
+      own: { pid: process.pid, exeName: path.basename(process.execPath), version: (process.env.FOCUSFLOW_SMOKE && process.env.FOCUSFLOW_SMOKE_OWN_VERSION) || app.getVersion() },
       list: listFocusFlowProcesses,
       confirm: async older => {
         if (process.env.FOCUSFLOW_SMOKE) return process.env.FOCUSFLOW_SMOKE_TAKEOVER === 'accept' // automated runs never ask a human

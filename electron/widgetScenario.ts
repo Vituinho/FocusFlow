@@ -81,10 +81,14 @@ export async function runWidgetScenario(actions: WidgetScenarioActions, shotsDir
     return last
   }
 
+  // Startup: the widget must already be on screen with no click at all.
+  let seenNow = await eventually('00-startup')
+  record('startup: widget is on screen without any click', seenNow.ok && !!live()?.isVisible(), seenNow.detail)
+
   actions.setSettings({ theme: 'dark', transparency: false, alwaysOnTop: false, compactWidget: false })
   let result = await actions.reveal('scenario-baseline')
   await wait(600)
-  let seenNow = await eventually('01-baseline')
+  seenNow = await eventually('01-baseline')
   record('baseline: widget is visible on screen', result.ok && seenNow.ok, seenNow.detail)
 
   actions.openDashboard(); await wait(1200)
