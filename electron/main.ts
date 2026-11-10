@@ -1,4 +1,5 @@
-import { app, BrowserWindow, crashReporter, ipcMain, Menu, nativeTheme, Notification, powerMonitor, screen, session, shell, Tray } from 'electron'
+import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, screen, session, shell, Tray } from 'electron'
+import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -17,6 +18,8 @@ import { ScheduleEngine, EngineEvent, effectiveView, STALL_MS } from '../src/dom
 import { defaultData, migrateData, needsMigrationBackup, parseActivities } from '../src/domain/migration'
 import { applyRuntimeCommand } from '../src/domain/runtime'
 import { runSmoke } from './smoke'
+import { WidgetController, WidgetWindow } from './widgetController'
+import { listFocusFlowProcesses, offerTakeover } from './instances'
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Process setup. Everything that touches disk happens after the single-instance lock is held, so a second launch can
@@ -56,6 +59,7 @@ let lastHardware: HardwareSnapshot = EMPTY_HARDWARE
 /** Set once the user (or a manual reload) asked for the dashboard, so a hidden start never hides a requested window. */
 let recoveriesShouldShow = false
 const notifications = new Set<Notification>()
+let widgetController: WidgetController
 const windowBudgets = { dashboard: new RestartBudget(3, 5 * 60_000), widget: new RestartBudget(3, 5 * 60_000) }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -306,7 +310,7 @@ function createDashboard() {
   loadRenderer(window)
 }
 
-function createWidget() {
+function createWidget(): BrowserWindow {
   const window = new BrowserWindow({
     ...widgetRect(), title: 'FocusFlow · Foco', frame: false, resizable: false, alwaysOnTop: data.settings.alwaysOnTop,
     transparent: data.settings.transparency, backgroundColor: data.settings.transparency ? '#00000000' : '#171b20', show: false,
@@ -318,7 +322,6 @@ function createWidget() {
   logRendererEvents('widget', window)
   attachCloseToTray(window, quit)
   trackVisibility(window)
-  showWhenReady('widget', window, () => { if (data.widgetVisible) window.showInactive() })
   window.on('moved', () => {
     if (window.isDestroyed()) return
     data.widgetBounds = window.getBounds()
@@ -326,6 +329,7 @@ function createWidget() {
   })
   window.on('closed', () => { if (widget === window) widget = null })
   loadRenderer(window, { window: 'widget' })
+  return window
 }
 
 function openDashboard() {
@@ -336,16 +340,14 @@ function openDashboard() {
   window.focus()
 }
 
-function showWidget() {
-  if (!widget || widget.isDestroyed()) createWidget()
-  data.widgetVisible = true; persist()
-  widget!.setBounds(widgetRect())
-  widget!.showInactive()
-}
+/** Every "show the widget" entry point (dashboard button, tray, second launch) goes through the verified controller. */
+function showWidget(reason: string, pulse = true) { return widgetController.reveal(reason, { pulse }) }
 
-function hideWidget() {
-  data.widgetVisible = false; persist()
-  widget?.hide()
+function hideWidget(reason = 'tray') { widgetController.hide(reason) }
+
+/** Brings the widget back after something may have moved or hidden it (sleep, display change, recovery) without stealing attention. */
+function healWidget(reason: string) {
+  if (data.widgetVisible) void widgetController.reveal(reason, { pulse: false, remember: false })
 }
 
 /** Manual recovery: replaces both windows with fresh ones and a fresh restart budget. */
@@ -359,13 +361,14 @@ function reloadWindows() {
   recoveriesShouldShow = dashboardWasVisible || !launchedHidden
   createDashboard(); createWidget()
   if (dashboardWasVisible) recoveriesShouldShow = true
+  healWidget('reload-windows')
 }
 
 function refitWindows() {
   if (displayTimer) clearTimeout(displayTimer)
   displayTimer = setTimeout(() => {
     try {
-      if (widget && !widget.isDestroyed()) widget.setBounds(widgetRect())
+      healWidget('display-change')
       if (dashboard && !dashboard.isDestroyed() && !dashboard.isMaximized() && !dashboard.isMinimized()) {
         const rect = dashboardRect()
         const minimum = dashboardMinimum(rect)
@@ -396,7 +399,8 @@ function buildTrayMenu() {
     { label: trayStatusLabel().slice(0, 60), enabled: false },
     { type: 'separator' },
     { label: 'Abrir painel', click: () => openDashboard() },
-    widgetVisible ? { label: 'Ocultar widget', click: () => hideWidget() } : { label: 'Mostrar widget', click: () => showWidget() },
+    { label: widgetVisible ? 'Trazer widget para frente' : 'Mostrar widget', click: () => { void showWidget('tray-menu') } },
+    { label: 'Ocultar widget', enabled: widgetVisible, click: () => hideWidget('tray-menu') },
     { type: 'separator' },
     { label: 'Manter widget acima das janelas', type: 'checkbox', checked: data.settings.alwaysOnTop, click: () => applySettings({ ...data.settings, alwaysOnTop: !data.settings.alwaysOnTop }) },
     { label: 'Notificações', type: 'checkbox', checked: data.settings.notifications, click: () => applySettings({ ...data.settings, notifications: !data.settings.notifications }) },
@@ -575,7 +579,10 @@ function registerIpc() {
     engine.markExternalChange(); persist(); tick(true)
   })
   handle<void>('window:dashboard', undefined, () => openDashboard())
-  handle<void>('window:widget', undefined, () => showWidget())
+  handle<{ ok: boolean; reason?: string }>('window:widget', { ok: false, reason: 'ipc-error' }, async () => {
+    const { ok, reason } = await showWidget('dashboard-button')
+    return { ok, reason }
+  })
   handle<void>('window:minimize', undefined, () => { dashboard?.hide() })
   handle<void>('window:close', undefined, () => { dashboard?.hide() })
   handle<void>('window:topmost', undefined, () => applySettings({ ...data.settings, alwaysOnTop: !data.settings.alwaysOnTop }))
@@ -633,9 +640,22 @@ function boot() {
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
 
   registerIpc()
+  widgetController = new WidgetController({
+    getWindow: () => (widget && !widget.isDestroyed() ? (widget as unknown as WidgetWindow) : null),
+    createWindow: () => createWidget() as unknown as WidgetWindow,
+    displays,
+    activeDisplay: () => { const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()); return { id: display.id, workArea: display.workArea } },
+    desiredBounds: widgetRect,
+    preferences: () => ({ alwaysOnTop: data.settings.alwaysOnTop, opacity: data.settings.transparency ? 0.88 : 1 }),
+    persistVisible: visible => { if (data.widgetVisible !== visible) { data.widgetVisible = visible; persist() } },
+    notifyFailure: message => { if (Notification.isSupported()) new Notification({ title: 'FocusFlow', body: message, silent: true }).show() },
+    logger, budget: new RestartBudget(4, 60_000),
+  })
+  logger.info(`Executable: ${process.execPath}${process.env.PORTABLE_EXECUTABLE_FILE ? ` (portable: ${process.env.PORTABLE_EXECUTABLE_FILE})` : ''}; displays: ${displays().map(d => `#${d.id} ${d.workArea.x},${d.workArea.y} ${d.workArea.width}x${d.workArea.height}`).join(' | ')}`)
   createDashboard()
   createWidget()
   createTray()
+  if (data.widgetVisible) void showWidget('startup', false)
   logger.info(`Startup: windows and tray created after ${Date.now() - bootStarted} ms`)
   // Local-only minidumps (nothing is uploaded). Started after the windows are up so it can never delay startup.
   setTimeout(() => { try { crashReporter.start({ uploadToServer: false, compress: true }) } catch (error) { logger.warn('Local crash dumps unavailable', error) } }, 5000).unref()
@@ -649,9 +669,10 @@ function boot() {
     tick(true)
     syncHardware()
     hardware?.retry()
+    setTimeout(() => healWidget('resume'), 2500).unref() // displays and the shell need a moment to settle after wake-up
   }
   powerMonitor.on('resume', resumed)
-  powerMonitor.on('unlock-screen', () => { engine.markResumed(); tick(true) })
+  powerMonitor.on('unlock-screen', () => { engine.markResumed(); tick(true); healWidget('unlock') })
   screen.on('display-metrics-changed', refitWindows)
   screen.on('display-added', refitWindows)
   screen.on('display-removed', refitWindows)
@@ -663,8 +684,9 @@ function boot() {
       app, logger, trayReport: () => trayReport, tray: () => tray, dashboard: () => dashboard, widget: () => widget,
       hardware: () => lastHardware, data: () => data, startupStatus, applyLoginItem: (enabled: boolean) => { data.settings.launchAtStartup = enabled; applyLoginItem() },
       launchedHidden, quit: () => requestQuit(), userData, stats,
+      widgetActions: { reveal: reason => widgetController.reveal(reason), heal: healWidget, windows: () => ({ dashboard, widget }) },
       actions: {
-        openDashboard, hideDashboard: () => { dashboard?.hide() }, showWidget, hideWidget, reloadWindows,
+        openDashboard, hideDashboard: () => { dashboard?.hide() }, showWidget: () => { void showWidget('harness') }, hideWidget: () => hideWidget('harness'), reloadWindows,
         setSettings: (patch: Partial<AppSettings>) => applySettings({ ...data.settings, ...patch }),
         command: (command: RuntimeCommand) => { const now = Date.now(); data.runtime = applyRuntimeCommand(data.runtime, command, effectiveView(now, data.schedules, data.settings.workingDays, data.runtime), now); engine.markExternalChange(); persist(); tick(true) },
         storeWrites: () => store.writes, windowCount: () => liveWindows().length, hardwareRunning: () => !!hardware?.isRunning,
@@ -680,11 +702,50 @@ app.on('before-quit', () => quit.request())
 // Windows (dashboard, widget) are hidden rather than closed; even if both disappear the tray keeps the app alive.
 app.on('window-all-closed', () => undefined)
 
-if (!app.requestSingleInstanceLock()) {
+/**
+ * This launch lost the single-instance lock. Normally the running copy just surfaces its windows. But when that copy is an OLDER build
+ * (for example 1.0.0 still sitting in the tray after an upgrade) the new build would exit silently and the user would keep using the
+ * old one without noticing. In that case, ask - and only with an explicit yes close the old one and start this version.
+ */
+async function handleLostLock() {
+  const userData = app.getPath('userData')
+  const log = createLogger({ directory: path.join(userData, 'logs') })
+  log.info(`Second launch of ${app.getVersion()} (pid ${process.pid}): another instance holds the lock`)
+  try {
+    const outcome = await offerTakeover({
+      own: { pid: process.pid, exeName: path.basename(process.execPath), version: app.getVersion() },
+      list: listFocusFlowProcesses,
+      confirm: async older => {
+        if (process.env.FOCUSFLOW_SMOKE) return process.env.FOCUSFLOW_SMOKE_TAKEOVER === 'accept' // automated runs never ask a human
+        const { response } = await dialog.showMessageBox({
+          type: 'question', title: 'FocusFlow', buttons: ['Fechar a versão anterior e abrir esta', 'Cancelar'], defaultId: 0, cancelId: 1, noLink: true,
+          message: `Uma versão anterior do FocusFlow (${older[0].version}) ainda está em execução e impede que a versão ${app.getVersion()} abra.`,
+          detail: `Programa: ${older[0].path}\nProcesso: ${older[0].pid}\n\nSuas rotinas e configurações serão mantidas. Deseja fechar a versão anterior agora?`,
+        })
+        return response === 0
+      },
+      kill: pid => new Promise<void>((resolve, reject) => { execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, error => error ? reject(error) : resolve()) }),
+      waitForExit: async pids => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          if (!(await listFocusFlowProcesses()).some(item => pids.includes(item.pid))) return true
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+        return false
+      },
+      relaunch: () => { app.relaunch(); app.exit(0) },
+      log: message => log.info(message),
+    })
+    if (outcome === 'replaced') return
+  } catch (error) { log.error('Could not check for an older running instance', error) }
   app.quit()
+}
+
+if (!app.requestSingleInstanceLock()) {
+  void app.whenReady().then(handleLostLock).catch(() => app.quit())
 } else {
-  app.on('second-instance', () => { if (loaded) openDashboard() })
-  app.on('activate', () => { if (loaded) openDashboard() })
+  const surface = (reason: string) => { if (!loaded) return; openDashboard(); if (data.widgetVisible) void showWidget(reason) }
+  app.on('second-instance', () => surface('second-launch'))
+  app.on('activate', () => surface('activate'))
   app.whenReady().then(boot).catch(error => {
     // Bootstrapping failed: record it and leave cleanly instead of a half-initialised process.
     try { logger?.error('FocusFlow failed to start', error) } catch { /* no logger yet */ }

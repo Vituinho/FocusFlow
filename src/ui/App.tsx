@@ -191,6 +191,12 @@ function Dashboard({ snapshot, now }: { snapshot: Snapshot; now: number }) {
     if (!payload.warning) setToast(`Agora em foco: ${payload.name}`)
   }), [])
   useEffect(() => { window.focusFlow.getStatus().then(value => setStatus(value)).catch(() => undefined) }, [settingsOpen])
+  const showWidget = async () => {
+    try {
+      const result = await window.focusFlow.showWidget()
+      setToast(result?.ok ? 'Widget exibido.' : 'Não foi possível exibir o widget. Use “Recarregar janelas” na bandeja ou abra os logs em Configurações.')
+    } catch { setToast('Não foi possível exibir o widget. Tente novamente.') }
+  }
   const setHardwareEnabled = (enabled: boolean) => void window.focusFlow.saveSettings({ ...settings, hardwareMonitor: enabled })
   const todayLabel = today.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })
   const startLabel = effective.dayStart !== null ? formatClock(effective.dayStart) : '08:00'
@@ -216,7 +222,7 @@ function Dashboard({ snapshot, now }: { snapshot: Snapshot; now: number }) {
         </header>
         <div className="page-content">
           {status?.previousSessionEndedUnexpectedly && !noticeDismissed && <div className="notice" role="status"><AlertTriangle size={16}/><span>O FocusFlow foi reaberto após um encerramento inesperado. Seus dados estão intactos; detalhes em Configurações › Sistema.</span><button className="text-button" onClick={() => setNoticeDismissed(true)}>Dispensar</button></div>}
-          <div className="page-heading"><div><div className="date-line"><CalendarDays size={14}/>{todayLabel}{workingToday && <span className="day-chip">{todayKind === 'saturday' ? 'Agenda de sábado' : 'Agenda de dias úteis'}</span>}</div><h1>{tab === 'hoje' ? 'No seu ritmo.' : 'Sua agenda.'}</h1><p>{tab === 'hoje' ? 'Um bloco de cada vez. Seu dia, com mais intenção.' : 'Uma rotina consistente abre espaço para um trabalho melhor.'}</p></div><button className="button secondary open-widget" onClick={() => void window.focusFlow.showWidget()}><PanelTop size={16}/> Mostrar widget</button></div>
+          <div className="page-heading"><div><div className="date-line"><CalendarDays size={14}/>{todayLabel}{workingToday && <span className="day-chip">{todayKind === 'saturday' ? 'Agenda de sábado' : 'Agenda de dias úteis'}</span>}</div><h1>{tab === 'hoje' ? 'No seu ritmo.' : 'Sua agenda.'}</h1><p>{tab === 'hoje' ? 'Um bloco de cada vez. Seu dia, com mais intenção.' : 'Uma rotina consistente abre espaço para um trabalho melhor.'}</p></div><button className="button secondary open-widget" onClick={() => void showWidget()}><PanelTop size={16}/> Mostrar widget</button></div>
           {tab === 'agenda' ? <SchedulePage snapshot={snapshot} onSaved={message => setToast(message)} onError={setToast} /> : <>
             <section className={`hero-card ${runtime.focusMode ? 'hero-focus' : ''}`} style={{ '--activity-color': current?.color ?? '#58d5bd' } as React.CSSProperties}>
               <div className="hero-glow" />
