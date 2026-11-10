@@ -6,6 +6,7 @@ import type { HardwareSnapshot } from './hardwareTypes'
 import type { Logger } from './logger'
 import type { AppData, StartupStatus } from './shared'
 import { runSoak, SoakActions, workerProcesses } from './soak'
+import { runWidgetScenario, WidgetScenarioActions } from './widgetScenario'
 import type { TrayIconReport } from './trayIcon'
 
 export type SmokeContext = {
@@ -24,9 +25,12 @@ export type SmokeContext = {
   userData: string
   stats: { ticks: number; maxGapMs: number; stalls: number; notifications: number }
   actions: SoakActions
+  widgetActions: Omit<WidgetScenarioActions, 'hideWidget' | 'openDashboard' | 'hideDashboard' | 'setSettings'>
 }
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+/** capturePage() never resolves for a hidden window; a screenshot must not be able to hang the whole check. */
+const withTimeout = <T>(promise: Promise<T>, ms: number) => Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))])
 
 /**
  * Developer/CI smoke check enabled only by the FOCUSFLOW_SMOKE environment variable (value = report path).
@@ -93,12 +97,15 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
     report.childProcesses = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${process.pid} } | ForEach-Object { $c = [string]$_.CommandLine; [string]$_.ProcessId + ' ' + $_.Name + ' :: ' + $c.Substring(0, [Math]::Min(100, $c.Length)) }`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 }).stdout.split(/\r?\n/).filter(Boolean)
     report.hardwareRunning = ctx.actions.hardwareRunning()
     report.stats = { ...ctx.stats }
+    if (process.env.FOCUSFLOW_SMOKE_WIDGET) {
+      report.widgetScenario = await runWidgetScenario({ ...ctx.widgetActions, hideWidget: ctx.actions.hideWidget, openDashboard: ctx.actions.openDashboard, hideDashboard: ctx.actions.hideDashboard, setSettings: ctx.actions.setSettings }, process.env.FOCUSFLOW_SMOKE_SHOTS)
+    }
     if (process.env.FOCUSFLOW_SMOKE_SOAK) report.soak = await runSoak(Number(process.env.FOCUSFLOW_SMOKE_SOAK), { actions: ctx.actions, stats: ctx.stats, logger: ctx.logger })
     const shots = process.env.FOCUSFLOW_SMOKE_SHOTS
     if (shots) {
       fs.mkdirSync(shots, { recursive: true })
       for (const [name, window] of [['dashboard', ctx.dashboard()], ['widget', ctx.widget()]] as const) {
-        if (window && !window.isDestroyed()) fs.writeFileSync(`${shots}/${name}.png`, (await window.webContents.capturePage()).toPNG())
+        try { if (window && !window.isDestroyed() && window.isVisible()) fs.writeFileSync(`${shots}/${name}.png`, (await withTimeout(window.webContents.capturePage(), 10_000)).toPNG()) } catch (error) { report.screenshotNote = String(error) }
       }
       const dash = ctx.dashboard()
       if (dash && !dash.isDestroyed()) {
@@ -106,7 +113,7 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
         for (const [label, file] of [['Agenda', 'agenda-weekday'], ['Sábado', 'agenda-saturday']] as const) {
           await click(label)
           await wait(700)
-          fs.writeFileSync(`${shots}/${file}.png`, (await dash.webContents.capturePage()).toPNG())
+          fs.writeFileSync(`${shots}/${file}.png`, (await withTimeout(dash.webContents.capturePage(), 10_000)).toPNG())
         }
       }
       report.screenshots = shots

@@ -14,6 +14,7 @@
 //   --offscreen       seed window bounds far outside every display (as after unplugging a monitor)
 //   --stall=SECONDS   suspend the main process for SECONDS from outside (like sleep/resume) and check stall handling
 //   --soak=SECONDS    bounded stress loop (hide/show, settings, hardware toggles, worker kills) with CPU/RAM/timer sampling
+//   --widget          widget end-to-end in the real app: covered/hidden/destroyed/crashed/off-screen/minimized, verified on the real screen
 //   --double          launch a second instance against the same data and prove it exits without touching focusflow.json
 //   --real-userdata   do not override the data folder (use only for name-isolated test installs)
 // Environment: SMOKE_SEED_V1=<json file> seeds focusflow.json, SMOKE_SHOTS=<dir> writes screenshots, SMOKE_KEEP=1 keeps the temp folder,
@@ -65,6 +66,7 @@ if (flags.has('--crash')) env.FOCUSFLOW_SMOKE_CRASH = '1'
 if (flags.has('--hidden-all')) env.FOCUSFLOW_SMOKE_EXPECT_HIDDEN = '1'
 if (stallSeconds) env.FOCUSFLOW_SMOKE_STALL = String(stallSeconds)
 if (soakSeconds) env.FOCUSFLOW_SMOKE_SOAK = String(soakSeconds)
+if (flags.has('--widget')) env.FOCUSFLOW_SMOKE_WIDGET = '1'
 if (flags.has('--double') && !stallSeconds) env.FOCUSFLOW_SMOKE_STALL = '12' // keeps the first instance alive long enough for the second launch (no process is suspended)
 if (process.env.SMOKE_SHOTS) env.FOCUSFLOW_SMOKE_SHOTS = process.env.SMOKE_SHOTS
 delete env.ELECTRON_RUN_AS_NODE
@@ -78,7 +80,7 @@ const SUSPEND = `Add-Type -Namespace N -Name P -MemberDefinition '[DllImport("nt
 console.log(`Launching ${command} ${commandArgs.join(' ')}`)
 const child = spawn(command, commandArgs, { env, stdio: 'ignore', windowsHide: false })
 const exited = new Promise(done => child.on('exit', code => done(code)))
-const timeoutMs = 90_000 + (soakSeconds + stallSeconds) * 1000
+const timeoutMs = 90_000 + (soakSeconds + stallSeconds) * 1000 + (flags.has('--widget') ? 240_000 : 0)
 const timeout = new Promise(done => setTimeout(() => done('timeout'), timeoutMs))
 
 const sideTasks = []
@@ -145,6 +147,7 @@ if (doubleInfo) {
 if (process.env.SMOKE_SEED_V1 && !flags.has('--real-userdata') && !hiddenAll) {
   check('v1 original kept as a migration backup', report.migrationFiles?.some(name => name.includes('.v1.') && name.endsWith('.bak.json')))
 }
+if (report.widgetScenario) for (const step of report.widgetScenario.steps) { console.log(`   ${step.ok ? 'ok ' : 'BAD'} ${step.name} ${step.detail ? '(' + step.detail + ')' : ''}`); check(`widget: ${step.name}`, step.ok) }
 if (report.soak) {
   const soak = report.soak
   check('soak: no logged errors', soak.errors.length === 0)
