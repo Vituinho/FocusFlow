@@ -11,6 +11,7 @@ export type WidgetScenarioActions = {
   setSettings(patch: Partial<AppSettings>): void
   heal(reason: string): void
   windows(): { dashboard: BrowserWindow | null; widget: BrowserWindow | null }
+  trayMenuClick(pattern: RegExp): boolean
 }
 
 export type StepResult = { name: string; ok: boolean; detail?: string }
@@ -119,6 +120,22 @@ export async function runWidgetScenario(actions: WidgetScenarioActions, shotsDir
   record('five simultaneous clicks produce one visible widget', burst.every(item => item.ok) && seenNow.ok && actions.windows().widget === widgetBefore, seenNow.detail)
   for (let index = 0; index < 3; index++) await actions.reveal('scenario-repeat')
   record('repeated clicks are idempotent (same window, still visible)', actions.windows().widget === widgetBefore && !!live()?.isVisible())
+
+  // The tray menu: same handlers a user triggers from the notification area.
+  record('tray menu offers Ocultar widget while visible', actions.trayMenuClick(/^Ocultar widget$/))
+  await wait(500)
+  record('tray "Ocultar widget" hides the widget', live()?.isVisible() === false)
+  record('tray menu then offers Mostrar widget', actions.trayMenuClick(/^Mostrar widget$/))
+  await wait(900)
+  seenNow = await eventually('05b-tray-show')
+  record('tray "Mostrar widget" shows it on screen', seenNow.ok, seenNow.detail)
+  const trayCover = coverFor(live()!)
+  await wait(900)
+  record('tray menu offers Trazer widget para frente while covered', actions.trayMenuClick(/^Trazer widget para frente$/))
+  await wait(700)
+  seenNow = await eventually('05c-tray-raise')
+  record('tray "Trazer widget para frente" lifts a covered widget', seenNow.ok, seenNow.detail)
+  trayCover.destroy()
 
   live()!.destroy()
   result = await actions.reveal('scenario-after-destroy')

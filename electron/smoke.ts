@@ -108,7 +108,7 @@ export async function runSmoke(reportPath: string, ctx: SmokeContext) {
         try { if (window && !window.isDestroyed() && window.isVisible()) fs.writeFileSync(`${shots}/${name}.png`, (await withTimeout(window.webContents.capturePage(), 10_000)).toPNG()) } catch (error) { report.screenshotNote = String(error) }
       }
       const dash = ctx.dashboard()
-      if (dash && !dash.isDestroyed()) {
+      if (dash && !dash.isDestroyed() && dash.isVisible()) {
         const click = (text: string) => dash.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('button')].find(x => (x.textContent || '').trim().startsWith(${JSON.stringify(text)})); b?.click(); return !!b })()`)
         for (const [label, file] of [['Agenda', 'agenda-weekday'], ['Sábado', 'agenda-saturday']] as const) {
           await click(label)

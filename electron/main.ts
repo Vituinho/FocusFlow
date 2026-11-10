@@ -684,7 +684,11 @@ function boot() {
       app, logger, trayReport: () => trayReport, tray: () => tray, dashboard: () => dashboard, widget: () => widget,
       hardware: () => lastHardware, data: () => data, startupStatus, applyLoginItem: (enabled: boolean) => { data.settings.launchAtStartup = enabled; applyLoginItem() },
       launchedHidden, quit: () => requestQuit(), userData, stats,
-      widgetActions: { reveal: reason => widgetController.reveal(reason), heal: healWidget, windows: () => ({ dashboard, widget }) },
+      widgetActions: {
+        reveal: reason => widgetController.reveal(reason), heal: healWidget, windows: () => ({ dashboard, widget }),
+        // Clicks the real tray menu template item (same handlers as a user click, without needing the Windows popup).
+        trayMenuClick: (pattern: RegExp) => { const item = buildTrayMenu().items.find(entry => pattern.test(entry.label)); if (!item || !item.enabled) return false; item.click({} as never, undefined, undefined as never); return true },
+      },
       actions: {
         openDashboard, hideDashboard: () => { dashboard?.hide() }, showWidget: () => { void showWidget('harness') }, hideWidget: () => hideWidget('harness'), reloadWindows,
         setSettings: (patch: Partial<AppSettings>) => applySettings({ ...data.settings, ...patch }),
