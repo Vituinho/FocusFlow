@@ -6,6 +6,11 @@
 #   powershell -File scripts/ui-startup-test.ps1 [-Exe path\to\FocusFlow.exe]
 param([string]$Exe = '')
 $ErrorActionPreference = 'Stop'
+
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Idle { [StructLayout(LayoutKind.Sequential)] public struct LI { public uint cb; public uint t; } [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LI p); public static uint Ms() { var i = new LI(); i.cb = 8; GetLastInputInfo(ref i); return (uint)Environment.TickCount - i.t; } }'
+# These tests move the mouse and cover the screen: wait (up to 10 minutes) until the user has left the machine alone for 20 s.
+function Wait-UserIdle { $end = (Get-Date).AddMinutes(10); while ([Idle]::Ms() -lt 20000) { if ((Get-Date) -gt $end) { Write-Host 'ABORT: the user is active at the machine; try again later'; exit 3 }; Start-Sleep 2 } }
+Wait-UserIdle
 $root = Split-Path -Parent $PSScriptRoot
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @'
@@ -41,7 +46,7 @@ function Run-Case($label, $extraArgs, $expectPulse) {
   $code = "Add-Type -AssemblyName System.Windows.Forms; `$f = New-Object System.Windows.Forms.Form; `$f.Text = 'FF-UI-COVER'; `$f.FormBorderStyle = 'None'; `$f.WindowState = 'Maximized'; `$f.BackColor = [System.Drawing.Color]::Magenta; [System.Windows.Forms.Application]::Run(`$f)"
   $cover = Start-Process powershell -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-Command', $code -PassThru; Start-Sleep -Milliseconds 2500
   $env:FOCUSFLOW_USER_DATA = "$work\userdata"
-  if ($Exe) { $app = Start-Process $Exe -ArgumentList $extraArgs -PassThru } else { $electron = (& node -e "console.log(require('electron'))" | Select -Last 1); $app = Start-Process $electron -ArgumentList (@($root) + $extraArgs) -PassThru }
+  if ($Exe) { if ($extraArgs.Count) { $app = Start-Process $Exe -ArgumentList $extraArgs -PassThru } else { $app = Start-Process $Exe -PassThru } } else { $electron = (& node -e "console.log(require('electron'))" | Select -Last 1); $app = Start-Process $electron -ArgumentList (@($root) + $extraArgs) -PassThru }
   Remove-Item Env:\FOCUSFLOW_USER_DATA
   try {
     $end = (Get-Date).AddSeconds(30); while ((Get-Date) -lt $end -and -not (Get-Widget $app.Id)) { Start-Sleep -Milliseconds 400 }

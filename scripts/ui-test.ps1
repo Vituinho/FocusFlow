@@ -8,6 +8,11 @@
 # FocusFlow running on the same machine is never touched. Needs an interactive desktop (it moves the mouse and creates a covering window).
 param([string]$Exe = '', [int]$Cycles = 3, [string]$Shots = '')
 $ErrorActionPreference = 'Stop'
+
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Idle { [StructLayout(LayoutKind.Sequential)] public struct LI { public uint cb; public uint t; } [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LI p); public static uint Ms() { var i = new LI(); i.cb = 8; GetLastInputInfo(ref i); return (uint)Environment.TickCount - i.t; } }'
+# These tests move the mouse and cover the screen: wait (up to 10 minutes) until the user has left the machine alone for 20 s.
+function Wait-UserIdle { $end = (Get-Date).AddMinutes(10); while ([Idle]::Ms() -lt 20000) { if ((Get-Date) -gt $end) { Write-Host 'ABORT: the user is active at the machine; try again later'; exit 3 }; Start-Sleep 2 } }
+Wait-UserIdle
 $root = Split-Path -Parent $PSScriptRoot
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
