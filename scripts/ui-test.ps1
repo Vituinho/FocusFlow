@@ -53,7 +53,7 @@ if ($Exe) { $app = Start-Process $Exe -ArgumentList "--remote-debugging-port=$po
 else { $electron = (& node -e "console.log(require('electron'))" 2>$null | Select -Last 1); $app = Start-Process $electron -ArgumentList $root, "--remote-debugging-port=$port" -PassThru }
 Remove-Item Env:\FOCUSFLOW_USER_DATA, Env:\FOCUSFLOW_TRAY_TAG
 $appPid = [uint32]$app.Id
-Start-Sleep 16
+Start-Sleep 8
 
 function Get-Widget { foreach ($line in [Ut]::Windows($appPid)) { $f = $line -split '\|'; if ([int]$f[0] -gt 200 -and [int]$f[0] -lt 400) { return [pscustomobject]@{ W = [int]$f[0]; H = [int]$f[1]; X = [int]$f[2]; Y = [int]$f[3]; Visible = ($f[4] -eq 'True') } } } }
 function Get-Dashboard { foreach ($line in [Ut]::Windows($appPid)) { $f = $line -split '\|'; if ([int]$f[0] -gt 800) { return [pscustomobject]@{ W = [int]$f[0]; H = [int]$f[1]; X = [int]$f[2]; Y = [int]$f[3]; Visible = ($f[4] -eq 'True') } } } }
@@ -114,6 +114,9 @@ function Save-WidgetShot($name) {
 }
 
 try {
+  # A freshly installed build can take a while to start on a busy machine: wait for the widget, then let the startup top-most pulse end.
+  $null = Wait-Until { $w = Get-Widget; $w -and $w.Visible } 60000
+  Start-Sleep 4
   Check 'app started and its widget is visible' ((Get-Widget).Visible) ("pid $appPid")
   $cdpOk = $true
   for ($cycle = 1; $cycle -le $Cycles; $cycle++) {
