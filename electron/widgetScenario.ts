@@ -44,7 +44,7 @@ export async function widgetOnScreen(window: BrowserWindow, shotsDir?: string, n
   for (let index = 0; index + 3 < pixels.length; index += 4) {
     total++
     const db = pixels[index] - PANEL.b, dg = pixels[index + 1] - PANEL.g, dr = pixels[index + 2] - PANEL.r
-    if (dr * dr + dg * dg + db * db <= 20 * 20) close++
+    if (dr * dr + dg * dg + db * db <= 14 * 14) close++
     else if (pixels[index] + pixels[index + 1] + pixels[index + 2] > 3 * 150) bright++
   }
   if (shotsDir && name) { fs.mkdirSync(shotsDir, { recursive: true }); fs.writeFileSync(path.join(shotsDir, `${name}.png`), crop.toPNG()) }
@@ -70,10 +70,10 @@ export async function runWidgetScenario(actions: WidgetScenarioActions, shotsDir
   const live = () => actions.windows().widget
   const seen = async (label: string, minimum = 0.3) => {
     const widget = live()
-    if (!widget || widget.isDestroyed()) return { ok: false, detail: 'no widget window', fraction: 0 }
+    if (!widget || widget.isDestroyed()) return { ok: false, detail: 'no widget window', fraction: 0, content: 0 }
     const { fraction, content, detail } = await widgetOnScreen(widget, shotsDir, label)
     // Visible = the panel colour fills the crop AND there is bright content (text/icons); a blank or crashed window has only the background.
-    return { ok: fraction >= minimum && (minimum === 0 || content >= 0.004), detail: `${(fraction * 100).toFixed(0)}% panel, ${(content * 100).toFixed(1)}% content pixels; ${detail}`, fraction }
+    return { ok: fraction >= minimum && (minimum === 0 || content >= 0.004), detail: `${(fraction * 100).toFixed(0)}% panel, ${(content * 100).toFixed(1)}% content pixels; ${detail}`, fraction, content }
   }
   const eventually = async (label: string, minimum = 0.3, timeoutMs = 20_000) => {
     const end = Date.now() + timeoutMs
@@ -103,7 +103,9 @@ export async function runWidgetScenario(actions: WidgetScenarioActions, shotsDir
   const cover = coverFor(widgetBefore)
   await wait(900)
   seenNow = await seen('02-covered', 0)
-  record('oracle sanity: a covering window really hides the widget', seenNow.fraction < 0.05, seenNow.detail)
+  // Hidden = none of the widget's text/icons are on screen. (Any covering window counts, including a dark third-party one: the panel colour alone
+  // is not a reliable signal because dark applications have nearly the same background.)
+  record('oracle sanity: a covering window really hides the widget', seenNow.content < 0.004, seenNow.detail)
   result = await actions.reveal('scenario-click-while-covered')
   await wait(500)
   seenNow = await eventually('03-after-click')
