@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1
+
+Patch release after the first real-world use of 1.1.0.
+
+### Fixed
+- **High CPU while the dashboard was open.** Profiling the real app with Chrome DevTools metrics showed ~44 style recalculations and layouts per second on the dashboard (and ~35 on the widget), caused by 0.4-0.5 s `width` transitions on every progress bar. Disabling transitions at runtime dropped the total from 40.5 % to 7.4 % of one core, which proved the cause. Bars now use compositor-only `scaleX` transforms. Measured on the installed NSIS builds, same machine and procedure (25 s per phase, total CPU of all FocusFlow processes as % of one core): dashboard + widget visible **28.4 % -> 4.5 %**, widget only 9.4 % -> 2.2-2.8 %, both hidden 2.0 % -> 1.6 %; style/layout recalculations on the dashboard 25.5/s -> 0.08/s. The remaining ~1.5-2 % is the hardware sampler. Details and limitations in `docs/performance.md`.
+- **Widget on startup.** An interactive launch now lifts the widget above a maximized window for a moment (your "always on top" preference is restored afterwards); the quiet start with Windows (`--hidden`) does not grab attention.
+- **Dashboard position.** The display-change handler re-applied the saved rectangle unconditionally. It now leaves any reachable window exactly where it is and only moves one that is off every display, has an unreachable title bar or no longer fits after a DPI change (also checked when opening the dashboard). Every saved position is logged with its display.
+
+### Added
+- `scripts/bench.mjs` (CPU and renderer metrics per process type), `scripts/ui-test.ps1` (real mouse clicks on the real tray menu and on the dashboard button with a maximized window covering the widget) and `scripts/ui-startup-test.ps1` (interactive versus login start).
+
 ## 1.1.0
 
 ### Added

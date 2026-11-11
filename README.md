@@ -53,11 +53,11 @@ npm install
 npm run package:win
 ```
 
-O instalador NSIS será criado em `release-win/FocusFlow-Setup-1.1.0.exe`. Para a versão portátil, use `npm run package:portable` (`release-win/FocusFlow-Portable-1.1.0.exe`) ou `npm run package:all` para ambos. O instalador oferece escolha do diretório, atalho na área de trabalho e no menu Iniciar.
+O instalador NSIS será criado em `release-win/FocusFlow-Setup-1.1.1.exe`. Para a versão portátil, use `npm run package:portable` (`release-win/FocusFlow-Portable-1.1.1.exe`) ou `npm run package:all` para ambos. O instalador oferece escolha do diretório, atalho na área de trabalho e no menu Iniciar.
 
 ## Instalação e uso
 
-1. Execute `release-win/FocusFlow-Setup-1.1.0.exe` e escolha o local de instalação.
+1. Execute `release-win/FocusFlow-Setup-1.1.1.exe` e escolha o local de instalação.
 2. Abra o FocusFlow pelo menu Iniciar ou pelo atalho da área de trabalho.
 3. O painel e o widget flutuante são abertos. Arraste o widget para o canto desejado; a posição é guardada.
 4. Use os controles do widget para pausar, abrir o painel, trocar para o modo compacto ou manter o widget acima de outras janelas.
