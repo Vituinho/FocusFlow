@@ -45,7 +45,7 @@ export async function widgetOnScreen(window: BrowserWindow, shotsDir?: string, n
     total++
     const db = pixels[index] - PANEL.b, dg = pixels[index + 1] - PANEL.g, dr = pixels[index + 2] - PANEL.r
     if (dr * dr + dg * dg + db * db <= 14 * 14) close++
-    else if (pixels[index] + pixels[index + 1] + pixels[index + 2] > 3 * 150) bright++
+    else if (Math.min(pixels[index], pixels[index + 1], pixels[index + 2]) > 110) bright++ // near-white text; a saturated cover colour (magenta) has a ~0 channel
   }
   if (shotsDir && name) { fs.mkdirSync(shotsDir, { recursive: true }); fs.writeFileSync(path.join(shotsDir, `${name}.png`), crop.toPNG()) }
   return { fraction: total ? close / total : 0, content: total ? bright / total : 0, detail: `crop ${rect.width}x${rect.height} at ${rect.x},${rect.y} of ${thumb.width}x${thumb.height}` }
